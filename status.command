@@ -26,22 +26,44 @@ fi
 
 PORT=$(ps -p "$PID" -o command= 2>/dev/null | sed -n 's/.*--port \([0-9][0-9]*\).*/\1/p' | head -n 1)
 PORT=${PORT:-3030}
+CONTROL_PORT=$((PORT + 1))
 
-echo "状态：运行中（PID $PID，端口 $PORT）"
+WEB_JSON=$(curl -s --max-time 2 "http://127.0.0.1:$CONTROL_PORT/api/service" 2>/dev/null)
+case "$WEB_JSON" in
+  *'"web":true'*)  WEB_STATE=true ;;
+  *'"web":false'*) WEB_STATE=false ;;
+  *)               WEB_STATE=unknown ;;
+esac
+case "$WEB_STATE" in
+  true)  WEB_LABEL="开启（http://127.0.0.1:$PORT/）" ;;
+  false) WEB_LABEL="关闭" ;;
+  *)     WEB_LABEL="未知" ;;
+esac
+
+echo "状态：运行中（PID $PID，控制端口 $CONTROL_PORT）"
+echo "网页服务：$WEB_LABEL"
 if pgrep -f "MibandFloat.app/Contents/MacOS/MibandFloat" >/dev/null 2>&1; then
   echo "浮窗：运行中"
 else
   echo "浮窗：未运行"
 fi
-PORT="$PORT" python3 - <<'PY'
+CONTROL_PORT="$CONTROL_PORT" python3 - <<'PY'
 import json
 import os
 import urllib.request
 
-port = os.environ.get("PORT", "3030")
+port = os.environ.get("CONTROL_PORT", "3031")
 try:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/state", timeout=2) as response:
-        data = json.load(response)
+    # /api/events 是 SSE 长连接，只读第一帧后立刻断开。
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/events", timeout=2) as response:
+        for raw in response:
+            line = raw.decode("utf-8", "replace").strip()
+            if line.startswith("data:"):
+                data = json.loads(line[5:].strip())
+                break
+        else:
+            print("未收到状态数据")
+            raise SystemExit(0)
 except Exception as error:
     print(f"无法读取 API：{error}")
     raise SystemExit(0)

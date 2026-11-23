@@ -122,6 +122,7 @@ pub struct StatusEvent {
     pub bpm: Option<u16>,
     pub last_valid_age_ms: Option<i64>,
     pub last_error: Option<String>,
+    pub csv_path: String,
 }
 
 impl SharedState {
@@ -179,6 +180,7 @@ impl SharedState {
             bpm: snapshot.bpm,
             last_valid_age_ms: snapshot.last_valid_age_ms,
             last_error: snapshot.last_error,
+            csv_path: snapshot.csv_path,
         }
     }
 
@@ -705,6 +707,7 @@ mod advert_tests {
             offset,
             stale_secs: 6,
             hold_secs: 45,
+            web_on_start: false,
             data_dir: dir.clone(),
             open_browser: false,
             verbose: false,
@@ -885,6 +888,7 @@ mod target_tests {
             offset: 3,
             stale_secs: 6,
             hold_secs: 45,
+            web_on_start: false,
             data_dir: dir,
             open_browser: false,
             verbose: false,

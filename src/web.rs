@@ -8,11 +8,70 @@ use serde::Deserialize;
 use warp::sse::Event;
 use warp::Filter;
 
+use crate::service::WebServiceState;
 use crate::state::SharedState;
 
 #[derive(Deserialize)]
 struct StateQuery {
     minutes: Option<u32>,
+}
+
+/// 控制端口路由：常开，只提供推送订阅与网页服务启停。
+/// 浮窗靠它拿数据和开关网页服务。
+pub fn bind_control(
+    shared: Arc<SharedState>,
+    service_state: Arc<WebServiceState>,
+    port: u16,
+) -> Result<(SocketAddr, impl Future<Output = ()> + Send + 'static), Box<dyn Error>> {
+    let events_shared = shared.clone();
+    let events = warp::path!("api" / "events")
+        .and(warp::get())
+        .map(move || {
+            let shared = events_shared.clone();
+            let revision = shared.revision();
+            let body = async_stream::stream! {
+                yield Ok::<_, Infallible>(Event::default().json_data(&shared.status_event()).unwrap());
+                let mut last = revision;
+                loop {
+                    let event = shared.wait_for_change(last).await;
+                    last = event.revision;
+                    yield Ok(Event::default().json_data(&event).unwrap());
+                }
+            };
+            warp::sse::reply(warp::sse::keep_alive().stream(body))
+        });
+
+    let toggle_shared = service_state.clone();
+    let status_shared = service_state.clone();
+    let service = warp::path!("api" / "service")
+        .and(warp::get())
+        .and(warp::query::<ServiceQuery>())
+        .map(move |query: ServiceQuery| {
+            let running = match query.action.as_deref() {
+                Some("on") => {
+                    toggle_shared.start();
+                    true
+                }
+                Some("off") => {
+                    toggle_shared.stop();
+                    false
+                }
+                _ => status_shared.is_running(),
+            };
+            warp::reply::json(&serde_json::json!({ "web": running }))
+        });
+
+    let routes = events
+        .or(service)
+        .with(warp::reply::with::header("x-content-type-options", "nosniff"));
+
+    let (address, server) = warp::serve(routes).try_bind_ephemeral(([127, 0, 0, 1], port))?;
+    Ok((address, server))
+}
+
+#[derive(Deserialize)]
+struct ServiceQuery {
+    action: Option<String>,
 }
 
 pub fn bind(

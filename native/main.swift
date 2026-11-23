@@ -531,6 +531,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private let defaults = UserDefaults.standard
     private var port = 3030
+    private var controlPort: Int { port + 1 }
+    private var webServiceRunning = false
     private var userVisible = true
     private var locked = false
     private var scale: CGFloat = 1.0
@@ -545,6 +547,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         observeWindowMoves()
         registerUnlockHotKey()
         startEventStream()
+        refreshServiceState()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.backendReachable else { return }
             self.ensureBackend()
@@ -914,7 +917,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openEventStream() {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/events") else { return }
+        guard let url = URL(string: "http://127.0.0.1:\(controlPort)/api/events") else { return }
         var request = URLRequest(url: url)
         request.timeoutInterval = 3600
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -1101,6 +1104,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openPanel() {
+        // 网页服务默认关闭，打开面板前先确保它已启动。
+        guard let serviceURL = URL(
+            string: "http://127.0.0.1:\(controlPort)/api/service?action=on"
+        ) else { return }
+        var request = URLRequest(url: serviceURL)
+        request.timeoutInterval = 3
+        URLSession.shared.dataTask(with: request) { [weak self] _, _, _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.webServiceRunning = true
+                self.openPanelInBrowser()
+            }
+        }.resume()
+    }
+
+    private func openPanelInBrowser() {
         guard let url = URL(string: "http://127.0.0.1:\(port)/") else { return }
         let edge = URL(fileURLWithPath: "/Applications/Microsoft Edge.app")
         if FileManager.default.fileExists(atPath: edge.path) {
@@ -1133,6 +1152,44 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.ensureBackend(force: true)
         }
+    }
+
+    @objc private func toggleWebService() {
+        let target = webServiceRunning ? "off" : "on"
+        guard let url = URL(string: "http://127.0.0.1:\(controlPort)/api/service?action=\(target)") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self else { return }
+            var running = (target == "on")
+            if let data,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let value = json["web"] as? Bool {
+                running = value
+            }
+            DispatchQueue.main.async {
+                self.webServiceRunning = running
+                self.refreshServiceState()
+            }
+        }.resume()
+    }
+
+    /// 读取控制端口的服务状态，保持菜单勾选与实际一致。
+    private func refreshServiceState() {
+        guard let url = URL(string: "http://127.0.0.1:\(controlPort)/api/service") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let running = json["web"] as? Bool
+            else { return }
+            DispatchQueue.main.async {
+                self.webServiceRunning = running
+            }
+        }.resume()
     }
 
     @objc private func openBluetoothSettings() {
@@ -1184,6 +1241,12 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             addAction(to: menu, title: "启动后台服务", action: #selector(startBackend))
         }
+        addToggle(
+            to: menu,
+            title: "网页服务（面板 / OBS）",
+            action: #selector(toggleWebService),
+            on: webServiceRunning
+        )
         addAction(to: menu, title: "蓝牙权限设置", action: #selector(openBluetoothSettings))
         addAction(to: menu, title: "打开网页面板", action: #selector(openPanel))
         addAction(to: menu, title: "重置位置", action: #selector(resetPosition))

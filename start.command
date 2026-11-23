@@ -48,8 +48,9 @@ if [[ -f "$PIDFILE" ]]; then
   rm -f "$PIDFILE"
 fi
 
-if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "端口 $PORT 已被占用，未启动。可用 ./start.command --port 3031 换端口。"
+CONTROL_PORT=$((PORT + 1))
+if lsof -nP -iTCP:"$CONTROL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "控制端口 $CONTROL_PORT 已被占用，未启动。可用 ./start.command --port 3040 换端口。"
   sleep 1
   exit 1
 fi
@@ -64,7 +65,7 @@ for ((i = 0; i < 50; i++)); do
   if ! kill -0 "$PID" 2>/dev/null; then
     break
   fi
-  if curl -fsS --max-time 1 "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+  if curl -fsS --max-time 1 "http://127.0.0.1:$CONTROL_PORT/api/service" >/dev/null 2>&1; then
     READY=1
     break
   fi
@@ -88,7 +89,6 @@ else
   open_panel "http://127.0.0.1:$PORT/"
 fi
 echo "已启动（PID $PID）"
-echo "面板：http://127.0.0.1:$PORT/"
-echo "OBS ：http://127.0.0.1:$PORT/overlay"
+echo "网页面板：默认关闭，可在浮窗右键菜单开启（或访问 http://127.0.0.1:$CONTROL_PORT/api/service?action=on）"
 echo "停止：双击 stop.command"
 sleep 1

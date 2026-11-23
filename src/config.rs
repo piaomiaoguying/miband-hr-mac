@@ -29,6 +29,7 @@ pub struct Config {
     pub offset: usize,
     pub stale_secs: u64,
     pub hold_secs: u64,
+    pub web_on_start: bool,
     pub data_dir: PathBuf,
     pub open_browser: bool,
     pub verbose: bool,
@@ -49,6 +50,7 @@ impl Config {
         let mut offset: usize = 3;
         let mut stale_secs: u64 = 15;
         let mut hold_secs: u64 = 45;
+        let mut web_on_start = false;
         let mut data_dir: Option<PathBuf> = None;
         let mut open_browser = true;
         let mut verbose = false;
@@ -69,6 +71,7 @@ impl Config {
                 }
                 "--verbose" | "-v" => verbose = true,
                 "--no-open" => open_browser = false,
+                "--web" => web_on_start = true,
                 "--mode" => {
                     i += 1;
                     let value = args.get(i).ok_or("--mode 缺少参数")?;
@@ -153,6 +156,7 @@ impl Config {
             offset,
             stale_secs,
             hold_secs,
+            web_on_start,
             data_dir,
             open_browser,
             verbose,
@@ -190,6 +194,7 @@ macOS 小米手环心率监听（小米手环 4~7 运动心率广播）
   --hold <秒>                旧心率最多保留显示多少秒（默认 45）
   --data-dir <目录>          CSV 保存目录（默认 data/）
   --no-open                  启动后不自动打开浏览器
+  --web                      启动时同时开启网页面板（默认关闭）
   -v, --verbose              输出每一条有效广播
   -h, --help                 显示帮助
   -V, --version              显示版本
