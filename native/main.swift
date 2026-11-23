@@ -114,6 +114,8 @@ private final class FloatView: NSView {
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
     private var lastDragPoint: NSPoint = .zero
+    /// 拖动开始时缓存一次可见区域，避免每帧查询窗口/屏幕属性。
+    private var cachedVisibleFrame: NSRect?
     private var resizing = false
     private var resizeStartScale: CGFloat = 1
     private var resizeStartWidth: CGFloat = 0
@@ -203,6 +205,7 @@ private final class FloatView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         dragStartMouse = NSEvent.mouseLocation
         lastDragPoint = NSEvent.mouseLocation
+        cachedVisibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame
         if showResizeGrip && gripVisible && gripHitRect.contains(point) {
             resizing = true
             dragStartOrigin = nil
@@ -237,19 +240,14 @@ private final class FloatView: NSView {
             needsLayout = true
             renderContent()
             onInteractiveScaleChanged?(clamped)
-        } else if dragStartOrigin != nil {
-            // 用事件自带的增量累加，而不是「起始点 + 当前点」。
-            // 快速拖动时事件可能被合并或丢弃，绝对差值会累积成漂移；
-            // 增量只依赖相邻两帧的相对位移，不会积累误差。
-            let delta = event.deltaX == 0 && event.deltaY == 0
-                ? NSPoint(x: current.x - lastDragPoint.x, y: current.y - lastDragPoint.y)
-                : NSPoint(x: event.deltaX, y: -event.deltaY)
-            lastDragPoint = current
-            var origin = window.frame.origin
-            origin.x += delta.x
-            origin.y += delta.y
-            // 限制在所在屏幕的可见范围内，避免拖到看不见的地方。
-            if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+        } else if let startOrigin = dragStartOrigin, let startMouse = dragStartMouse {
+            // 回到绝对差值实现：每帧只做一次减法，不查询 window.screen / frame。
+            // 之前改成 event.deltaX 增量累加在快速拖动时反而卡顿。
+            var origin = NSPoint(
+                x: startOrigin.x + current.x - startMouse.x,
+                y: startOrigin.y + current.y - startMouse.y
+            )
+            if let visible = cachedVisibleFrame {
                 let size = window.frame.size
                 origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - size.width))
                 origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - size.height))
