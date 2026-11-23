@@ -76,12 +76,25 @@ private final class FloatView: NSView {
     /// 纯透明模式下窗口不应再有系统投影，否则会在四周留一圈黑色描边。
     var onTransparentChanged: ((Bool) -> Void)?
 
+    /// 是否允许通过手柄缩放（锁定时禁用）。
     var showResizeGrip = true {
         didSet {
+            gripVisible = showResizeGrip && isHovering
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    /// 手柄是否实际绘制。默认隐藏，鼠标进入浮窗才显示。
+    private var gripVisible = false {
+        didSet {
+            guard gripVisible != oldValue else { return }
             renderContent()
             window?.invalidateCursorRects(for: self)
         }
     }
+
+    private var isHovering = false
+    private var hoverTrackingArea: NSTrackingArea?
 
     /// 锁定时窗口整体忽略鼠标事件，实现真正的点击穿透。
     /// 解锁依赖全局热键 ⌘⇧L（Carbon，无需辅助功能权限），因此不会锁死。
@@ -188,7 +201,7 @@ private final class FloatView: NSView {
         guard !isLocked, let window else { return }
         let point = convert(event.locationInWindow, from: nil)
         dragStartMouse = NSEvent.mouseLocation
-        if showResizeGrip && gripHitRect.contains(point) {
+        if showResizeGrip && gripVisible && gripHitRect.contains(point) {
             resizing = true
             dragStartOrigin = nil
             resizeStartScale = scale
@@ -221,6 +234,7 @@ private final class FloatView: NSView {
             renderContent()
             onInteractiveScaleChanged?(clamped)
         } else if let startOrigin = dragStartOrigin {
+            // setFrameOrigin 只改位置、不重绘内容，拖动时最轻量。
             window.setFrameOrigin(NSPoint(
                 x: startOrigin.x + current.x - startMouse.x,
                 y: startOrigin.y + current.y - startMouse.y
@@ -237,7 +251,7 @@ private final class FloatView: NSView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if showResizeGrip {
+        if showResizeGrip && gripVisible {
             addCursorRect(gripHitRect, cursor: .crosshair)
         }
     }
@@ -314,6 +328,31 @@ private final class FloatView: NSView {
         }
 
         updateHeartAnimation()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        hoverTrackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        gripVisible = showResizeGrip
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        gripVisible = false
     }
 
     override func layout() {
@@ -420,7 +459,7 @@ private final class FloatView: NSView {
             at: NSPoint(x: dotRect.maxX + 5 * s, y: padY)
         )
 
-        if showResizeGrip {
+        if gripVisible {
             let side = 12 * s
             let origin = NSPoint(
                 x: rect.maxX - side - 14 * s,
@@ -527,6 +566,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var backendLogHandle: FileHandle?
     private var signalSource: DispatchSourceSignal?
     private var moveObserver: NSObjectProtocol?
+    private var saveFrameWorkItem: DispatchWorkItem?
     private var unlockHotKeyRef: EventHotKeyRef?
 
     private let defaults = UserDefaults.standard
@@ -628,12 +668,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observeWindowMoves() {
+        // 拖动过程中每帧都会触发 didMove。直接落盘会造成明显掉帧，
+        // 这里只在停止移动 300ms 后写一次。
         moveObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification,
             object: window,
             queue: .main
         ) { [weak self] _ in
-            self?.saveWindowFrame()
+            guard let self else { return }
+            self.saveFrameWorkItem?.cancel()
+            let item = DispatchWorkItem { [weak self] in
+                self?.saveWindowFrame()
+            }
+            self.saveFrameWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
         }
     }
 
@@ -1241,14 +1289,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             addAction(to: menu, title: "启动后台服务", action: #selector(startBackend))
         }
+        // 网页服务与网页面板相邻，先开关再打开，符合使用顺序。
         addToggle(
             to: menu,
             title: "网页服务（面板 / OBS）",
             action: #selector(toggleWebService),
             on: webServiceRunning
         )
-        addAction(to: menu, title: "蓝牙权限设置", action: #selector(openBluetoothSettings))
         addAction(to: menu, title: "打开网页面板", action: #selector(openPanel))
+        addAction(to: menu, title: "蓝牙权限设置", action: #selector(openBluetoothSettings))
         addAction(to: menu, title: "重置位置", action: #selector(resetPosition))
 
         menu.addItem(.separator())
