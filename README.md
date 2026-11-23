@@ -320,6 +320,7 @@ xattr -dr com.apple.quarantine .
 - 标准心率回退：服务 `0x180D`，特征 `0x2A37`，兼容标准心率带。
 - 同一时间只跟踪一个目标设备；可用 `--device` 固定。
 - 所有服务只监听 `127.0.0.1`，不对外网开放。
+- 原生浮窗通过 SSE（`/api/events`）订阅后端推送：只在收到手环广播时更新，不做定时轮询。
 - 协议与调试细节见 [`docs/protocol.md`](docs/protocol.md)。
 
 ## 从源码构建

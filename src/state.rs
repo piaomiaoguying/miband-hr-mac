@@ -3,7 +3,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use chrono::{DateTime, Local, NaiveDate, SecondsFormat};
 use serde::Serialize;
@@ -105,6 +107,21 @@ pub struct SharedState {
     pub cfg: Config,
     pub started: DateTime<Local>,
     inner: RwLock<Inner>,
+    /// 每次心率/状态变化时递增。等待推送的订阅者据此判断是否要发新事件。
+    revision: AtomicU64,
+    /// 变化通知：订阅者 await 后拿到当前 revision。
+    notify: Arc<Notify>,
+}
+
+/// 推送给浮窗的精简状态，只含渲染所需字段。
+#[derive(Clone, Serialize)]
+pub struct StatusEvent {
+    pub revision: u64,
+    pub status: &'static str,
+    pub status_label: &'static str,
+    pub bpm: Option<u16>,
+    pub last_valid_age_ms: Option<i64>,
+    pub last_error: Option<String>,
 }
 
 impl SharedState {
@@ -134,8 +151,50 @@ impl SharedState {
                 csv: CsvLogger::new(cfg.data_dir.clone()),
                 last_error: None,
             }),
+            revision: AtomicU64::new(0),
+            notify: Arc::new(Notify::new()),
             cfg,
         })
+    }
+
+    /// 标记状态已变化并唤醒所有等待的订阅者。
+    fn bump(&self) {
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// 当前状态版本号，用于订阅者判断是否有新事件。
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::SeqCst)
+    }
+
+    /// 返回当前精简状态，供推送使用。
+    pub fn status_event(&self) -> StatusEvent {
+        let minutes = 10;
+        let snapshot = self.snapshot(minutes);
+        StatusEvent {
+            revision: self.revision.load(Ordering::SeqCst),
+            status: snapshot.status,
+            status_label: snapshot.status_label,
+            bpm: snapshot.bpm,
+            last_valid_age_ms: snapshot.last_valid_age_ms,
+            last_error: snapshot.last_error,
+        }
+    }
+
+    /// 等待下一次状态变化。返回变化后的精简状态。
+    pub async fn wait_for_change(&self, last_seen: u64) -> StatusEvent {
+        loop {
+            // 先登记等待，再检查 revision，避免丢失通知。
+            let notified = self.notify.notified();
+            if self.revision.load(Ordering::SeqCst) != last_seen {
+                return self.status_event();
+            }
+            notified.await;
+            if self.revision.load(Ordering::SeqCst) != last_seen {
+                return self.status_event();
+            }
+        }
     }
 
     pub fn observe_advert(
@@ -177,6 +236,8 @@ impl SharedState {
                 inner.bpm = None;
             }
         }
+        drop(inner);
+        self.bump();
     }
 
     pub fn observe_gatt(&self, name: &str, id: &str, bpm: u16) {
@@ -196,6 +257,8 @@ impl SharedState {
         inner.target_id = Some(id.to_string());
         inner.last_error = None;
         inner.record_valid(bpm, now);
+        drop(inner);
+        self.bump();
     }
 
     pub fn observe_mock(&self, bpm: u16) {
@@ -221,6 +284,8 @@ impl SharedState {
         inner.packet_count += 1;
         inner.last_error = None;
         inner.record_valid(bpm, now);
+        drop(inner);
+        self.bump();
     }
 
     pub fn seed_mock_history(&self, seconds: u32) {
@@ -268,10 +333,12 @@ impl SharedState {
 
     pub fn note_error(&self, error: impl Into<String>) {
         self.inner.write().unwrap().last_error = Some(error.into());
+        self.bump();
     }
 
     pub fn clear_error(&self) {
         self.inner.write().unwrap().last_error = None;
+        self.bump();
     }
 
     pub fn snapshot(&self, minutes: u32) -> Snapshot {

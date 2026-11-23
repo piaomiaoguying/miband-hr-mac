@@ -1,9 +1,11 @@
+use std::convert::Infallible;
 use std::error::Error;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use serde::Deserialize;
+use warp::sse::Event;
 use warp::Filter;
 
 use crate::state::SharedState;
@@ -40,6 +42,26 @@ pub fn bind(
             )
         });
 
+    // 推送端点：连接建立后立即发一次当前状态，之后只在收到广播或状态变化时推送。
+    // 没有广播时连接保持静默，不产生轮询开销。
+    let events_shared = shared.clone();
+    let events = warp::path!("api" / "events")
+        .and(warp::get())
+        .map(move || {
+            let shared = events_shared.clone();
+            let revision = shared.revision();
+            let body = async_stream::stream! {
+                yield Ok::<_, Infallible>(Event::default().json_data(&shared.status_event()).unwrap());
+                let mut last = revision;
+                loop {
+                    let event = shared.wait_for_change(last).await;
+                    last = event.revision;
+                    yield Ok(Event::default().json_data(&event).unwrap());
+                }
+            };
+            warp::sse::reply(warp::sse::keep_alive().stream(body))
+        });
+
     let export_shared = shared.clone();
     let export = warp::path!("api" / "export.csv")
         .and(warp::get())
@@ -68,6 +90,7 @@ pub fn bind(
 
     let routes = root
         .or(overlay)
+        .or(events)
         .or(state)
         .or(export)
         .or(health)

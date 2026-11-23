@@ -516,8 +516,11 @@ private final class FloatView: NSView {
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: FloatWindow!
     private var floatView: FloatView!
-    private var pollTimer: Timer?
-    private var isPolling = false
+    private var streamSession: URLSession?
+    private var streamTask: URLSessionDataTask?
+    private var streamDelegate: EventStreamDelegate?
+    private var isStreaming = false
+    private var reconnectDelay: Double = 0.5
     private var lastState: HeartRateState?
     private var backendReachable = false
     private var backendProcess: Process?
@@ -541,7 +544,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         observeTermination()
         observeWindowMoves()
         registerUnlockHotKey()
-        startPolling()
+        startEventStream()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.backendReachable else { return }
             self.ensureBackend()
@@ -632,7 +635,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        pollTimer?.invalidate()
+        stopEventStream()
         saveWindowFrame()
         backendLogHandle?.closeFile()
         backendLogHandle = nil
@@ -901,38 +904,78 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         return String(data: data, encoding: .utf8)
     }
 
-    private func startPolling() {
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.poll()
-        }
-        RunLoop.main.add(pollTimer!, forMode: .common)
-        poll()
+    /// 订阅后端推送流。没有广播时连接静默，不做任何轮询计算。
+    /// 断线后按指数退避重连，最长 10 秒。
+    private func startEventStream() {
+        guard !isStreaming else { return }
+        isStreaming = true
+        reconnectDelay = 0.5
+        openEventStream()
     }
 
-    private func poll() {
-        guard !isPolling else { return }
-        isPolling = true
-        guard let url = URL(string: "http://127.0.0.1:\(port)/api/state?minutes=5") else {
-            isPolling = false
-            return
-        }
+    private func openEventStream() {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/events") else { return }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 1.5
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                self.isPolling = false
-                if let data, let state = try? JSONDecoder().decode(HeartRateState.self, from: data) {
-                    self.backendReachable = true
-                    self.lastState = state
-                    self.applyState(connected: true)
-                } else {
-                    self.backendReachable = false
-                    self.applyState(connected: false)
+        request.timeoutInterval = 3600
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+
+        let delegate = EventStreamDelegate(
+            onLine: { [weak self] payload in
+                guard let self else { return }
+                guard let data = payload.data(using: .utf8) else {
+                    NSLog("SSE: payload 转 Data 失败: %@", payload)
+                    return
                 }
+                let state: HeartRateState
+                do {
+                    state = try JSONDecoder().decode(HeartRateState.self, from: data)
+                } catch {
+                    NSLog("SSE: 解码失败 %@ / 原始: %@", String(describing: error), payload)
+                    return
+                }
+                self.backendReachable = true
+                self.lastState = state
+                self.applyState(connected: true)
+            },
+            onEnd: { [weak self] in
+                guard let self else { return }
+                self.backendReachable = false
+                self.applyState(connected: false)
+                self.scheduleReconnect()
             }
-        }.resume()
+        )
+        // URLSession 的 delegate 必须在初始化时绑定，用 dataTask(with:) 拿不到回调。
+        let session = URLSession(
+            configuration: .ephemeral,
+            delegate: delegate,
+            delegateQueue: .main
+        )
+        streamDelegate = delegate
+        streamSession = session
+        streamTask = session.dataTask(with: request)
+        streamTask?.resume()
+    }
+
+    private func scheduleReconnect() {
+        streamTask?.cancel()
+        streamTask = nil
+        streamSession?.invalidateAndCancel()
+        streamSession = nil
+        streamDelegate = nil
+        let delay = reconnectDelay
+        reconnectDelay = min(reconnectDelay * 2, 10)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.openEventStream()
+        }
+    }
+
+    private func stopEventStream() {
+        streamTask?.cancel()
+        streamTask = nil
+        streamSession?.invalidateAndCancel()
+        streamSession = nil
+        streamDelegate = nil
+        isStreaming = false
     }
 
     private func applyState(connected: Bool) {
@@ -1164,6 +1207,45 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         item.target = self
         item.state = on ? .on : .off
         menu.addItem(item)
+    }
+}
+
+// MARK: - SSE 客户端
+
+/// 逐行解析 text/event-stream，把 `data:` 行交给回调；连接结束时触发 onEnd。
+private final class EventStreamDelegate: NSObject, URLSessionDataDelegate {
+    private let onLine: (String) -> Void
+    private let onEnd: () -> Void
+    private var buffer = Data()
+    private var finished = false
+
+    init(onLine: @escaping (String) -> Void, onEnd: @escaping () -> Void) {
+        self.onLine = onLine
+        self.onEnd = onEnd
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive data: Data
+    ) {
+        buffer.append(data)
+        while let newline = buffer.firstIndex(of: 0x0A) {
+            let lineData = buffer[buffer.startIndex..<newline]
+            buffer.removeSubrange(buffer.startIndex...newline)
+            guard let line = String(data: lineData, encoding: .utf8) else { continue }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard !payload.isEmpty else { continue }
+            onLine(String(payload))
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard !finished else { return }
+        finished = true
+        onEnd()
     }
 }
 
