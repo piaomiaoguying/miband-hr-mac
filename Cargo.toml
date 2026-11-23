@@ -1,0 +1,22 @@
+[package]
+name = "miband-hr-mac"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "macOS heart-rate monitor for Xiaomi Mi Band 4-7 workout broadcasts"
+repository = "https://github.com/Tnze/miband-heart-rate"
+
+[dependencies]
+bluest = "0.6.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures-lite = "2.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.45", features = ["full"] }
+warp = "0.3.7"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

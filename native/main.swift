@@ -1,0 +1,1025 @@
+import AppKit
+import Darwin
+import Foundation
+import QuartzCore
+
+// MARK: - 主题
+
+private let accentColor = NSColor(srgbRed: 0.902, green: 0.404, blue: 0.404, alpha: 1.0)
+private let positiveColor = NSColor(srgbRed: 0.047, green: 0.639, blue: 0.047, alpha: 1.0)
+private let warnColor = NSColor(srgbRed: 0.980, green: 0.698, blue: 0.098, alpha: 1.0)
+private let seriousColor = NSColor(srgbRed: 0.925, green: 0.514, blue: 0.353, alpha: 1.0)
+private let mutedColor = NSColor(srgbRed: 0.537, green: 0.529, blue: 0.506, alpha: 1.0)
+
+// MARK: - 数据模型
+
+private struct HeartRateState: Decodable {
+    let status: String
+    let statusLabel: String
+    let bpm: Int?
+    let lastValidAgeMs: Int?
+    let lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case statusLabel = "status_label"
+        case bpm
+        case lastValidAgeMs = "last_valid_age_ms"
+        case lastError = "last_error"
+    }
+}
+
+// MARK: - 浮窗
+
+private final class FloatWindow: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init(contentRect: NSRect) {
+        super.init(
+            contentRect: contentRect,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        isFloatingPanel = true
+        becomesKeyOnlyIfNeeded = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+    }
+}
+
+// MARK: - 心形
+
+private final class HeartView: NSView {
+    private let heartLayer = CALayer()
+    private var bpm: Int?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        heartLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        heartLayer.contentsGravity = .resizeAspect
+        heartLayer.contents = makeHeartImage()
+        heartLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        heartLayer.actions = [
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "contents": NSNull(),
+            "contentsScale": NSNull(),
+            "backgroundColor": NSNull()
+        ]
+        layer?.addSublayer(heartLayer)
+        updateAnimation()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(bpm: Int?) {
+        guard self.bpm != bpm else { return }
+        self.bpm = bpm
+        updateAnimation()
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let size = bounds.size
+        heartLayer.bounds = CGRect(origin: .zero, size: size)
+        heartLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        CATransaction.commit()
+    }
+
+    private func makeHeartImage() -> CGImage? {
+        guard let symbol = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: nil) else {
+            return nil
+        }
+        let size = NSSize(width: 128, height: 128)
+        let image = NSImage(size: size, flipped: false) { rect in
+            symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.compositingOperation = .sourceAtop
+            accentColor.setFill()
+            NSBezierPath(rect: rect).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            return true
+        }
+        return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+    }
+
+    private func updateAnimation() {
+        heartLayer.removeAnimation(forKey: "beat")
+        let duration = bpm.map { max(0.38, min(1.4, 60.0 / Double($0))) } ?? 1.15
+        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
+        animation.values = [1.0, 1.13, 1.0, 1.06, 1.0, 1.0]
+        animation.keyTimes = [0, 0.12, 0.24, 0.36, 0.48, 1]
+        animation.duration = duration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        heartLayer.add(animation, forKey: "beat")
+    }
+}
+
+// MARK: - 缩放手柄
+
+private final class GripView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let width = bounds.width
+        let height = bounds.height
+        guard width > 0, height > 0 else { return }
+        let path = NSBezierPath()
+        path.lineWidth = max(1, width / 10)
+        path.lineCapStyle = .round
+        NSColor.white.withAlphaComponent(0.72).setStroke()
+        path.move(to: NSPoint(x: 0, y: 0))
+        path.line(to: NSPoint(x: width, y: height))
+        path.move(to: NSPoint(x: width * 0.38, y: 0))
+        path.line(to: NSPoint(x: width, y: height * 0.62))
+        path.move(to: NSPoint(x: width * 0.74, y: 0))
+        path.line(to: NSPoint(x: width, y: height * 0.26))
+        path.stroke()
+    }
+}
+
+// MARK: - 浮窗内容
+
+private final class FloatView: NSView {
+    var scale: CGFloat = 1 {
+        didSet {
+            guard scale != oldValue else { return }
+            updateFonts()
+            needsLayout = true
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    var transparentBackground = false {
+        didSet { pill.isHidden = transparentBackground }
+    }
+
+    var showResizeGrip = true {
+        didSet {
+            gripView.isHidden = !showResizeGrip
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
+    var makeMenu: (() -> NSMenu)?
+    var onPositionChanged: (() -> Void)?
+    var onInteractiveScaleChanged: ((CGFloat) -> Void)?
+
+    private let pill = NSView()
+    private let gripView = GripView()
+    private let heart = HeartView()
+    private let bpmLabel = NSTextField(labelWithString: "--")
+    private let unitLabel = NSTextField(labelWithString: "BPM")
+    private let statusLabel = NSTextField(labelWithString: "等待手环")
+    private let statusDot = NSView()
+    private var dragStartMouse: NSPoint?
+    private var dragStartOrigin: NSPoint?
+    private var resizing = false
+    private var resizeStartScale: CGFloat = 1
+    private var resizeStartWidth: CGFloat = 0
+    private var resizeStartHeight: CGFloat = 0
+    private var resizeStartOrigin: NSPoint = .zero
+    private var bpmFont = NSFont.monospacedDigitSystemFont(ofSize: 64, weight: .semibold)
+    private var unitFont = NSFont.systemFont(ofSize: 10, weight: .medium)
+    private var statusFont = NSFont.systemFont(ofSize: 11, weight: .regular)
+    private var bpmText = "--"
+    private var statusText = "等待手环"
+    private var statusColor = mutedColor
+    // NSTextField 的 label cell 自带约 4pt 内边距，这里用固定值，避免小尺寸下按比例缩小后被裁切。
+    private let labelPadding: CGFloat = 6
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var isFlipped: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        self
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        makeMenu?()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        dragStartMouse = NSEvent.mouseLocation
+        if showResizeGrip && gripHitRect.contains(point) {
+            resizing = true
+            dragStartOrigin = nil
+            resizeStartScale = scale
+            resizeStartWidth = window.frame.width
+            resizeStartHeight = window.frame.height
+            resizeStartOrigin = window.frame.origin
+        } else {
+            resizing = false
+            dragStartOrigin = window.frame.origin
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window, let startMouse = dragStartMouse else { return }
+        let current = NSEvent.mouseLocation
+        if resizing {
+            guard resizeStartWidth > 0 else { return }
+            let delta = current.x - startMouse.x
+            let target = resizeStartScale * (resizeStartWidth + delta) / resizeStartWidth
+            let clamped = min(2.0, max(0.6, target))
+            guard abs(clamped - scale) > 0.002 else { return }
+            scale = clamped
+            let newSize = preferredSize
+            var frame = window.frame
+            frame.origin.x = resizeStartOrigin.x
+            frame.origin.y = resizeStartOrigin.y + resizeStartHeight - newSize.height
+            frame.size = newSize
+            window.setFrame(frame, display: true)
+            needsLayout = true
+            onInteractiveScaleChanged?(clamped)
+        } else if let startOrigin = dragStartOrigin {
+            window.setFrameOrigin(NSPoint(
+                x: startOrigin.x + current.x - startMouse.x,
+                y: startOrigin.y + current.y - startMouse.y
+            ))
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartMouse = nil
+        dragStartOrigin = nil
+        resizing = false
+        onPositionChanged?()
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if showResizeGrip {
+            addCursorRect(gripHitRect, cursor: .crosshair)
+        }
+    }
+
+    private var gripHitRect: NSRect {
+        let side = 20 * scale
+        return NSRect(x: bounds.maxX - side, y: 0, width: side, height: side)
+    }
+
+    private func setup() {
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor(srgbRed: 0.055, green: 0.055, blue: 0.05, alpha: 0.62).cgColor
+        pill.layer?.cornerRadius = 22
+        pill.layer?.cornerCurve = .continuous
+        pill.layer?.borderWidth = 1
+        pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.13).cgColor
+        pill.layer?.masksToBounds = true
+        pill.autoresizingMask = [.width, .height]
+        addSubview(pill)
+
+        for label in [bpmLabel, unitLabel, statusLabel] {
+            label.isEditable = false
+            label.isSelectable = false
+            label.isBordered = false
+            label.drawsBackground = false
+            label.lineBreakMode = .byClipping
+            addSubview(label)
+        }
+        addSubview(heart)
+        statusDot.wantsLayer = true
+        addSubview(statusDot)
+        statusDot.layer?.backgroundColor = mutedColor.cgColor
+
+        gripView.isHidden = !showResizeGrip
+        addSubview(gripView)
+
+        updateFonts()
+        update(state: nil, connected: false)
+    }
+
+    var preferredSize: NSSize {
+        let s = scale
+        let padX = 18 * s
+        let padY = 12 * s
+        let heartW = 30 * s
+        let gap = 12 * s
+        let bpmWidth = measure("000", font: bpmFont).width + labelPadding
+        let unitWidth = measure("BPM", font: unitFont, kern: 1.8 * s).width + labelPadding
+        let textWidth = bpmWidth + 6 * s + unitWidth
+        let statusWidth = measure("信号中断 · 00 分钟前", font: statusFont).width
+        let mainHeight = max(27 * s, measure("0", font: bpmFont).height)
+        let width = padX + heartW + gap + max(textWidth, statusWidth + 12 * s) + padX
+        let height = padY + mainHeight + 5 * s + measure("0", font: statusFont).height + padY
+        return NSSize(width: ceil(width), height: ceil(height))
+    }
+
+    func update(state: HeartRateState?, connected: Bool) {
+        let bpm = state?.bpm
+        let status = state?.status ?? ""
+        let age = state?.lastValidAgeMs
+
+        let permissionIssue = connected
+            && (state?.lastError?.contains("未授权") == true || state?.lastError?.contains("蓝牙不可用") == true)
+
+        if permissionIssue {
+            bpmText = bpm.map(String.init) ?? "--"
+            statusText = "需要蓝牙权限"
+            statusColor = seriousColor
+            statusDot.layer?.backgroundColor = seriousColor.cgColor
+            setContentAlpha(0.85)
+        } else if !connected {
+            bpmText = bpm.map(String.init) ?? "--"
+            statusText = "后端未运行"
+            statusColor = mutedColor
+            statusDot.layer?.backgroundColor = mutedColor.cgColor
+            setContentAlpha(0.7)
+        } else if let bpm {
+            bpmText = String(bpm)
+            switch status {
+            case "live":
+                statusText = "实时"
+                statusColor = positiveColor
+                statusDot.layer?.backgroundColor = positiveColor.cgColor
+                setContentAlpha(1)
+            case "holding":
+                statusText = "保持中 · \(ageText(age))"
+                statusColor = warnColor
+                statusDot.layer?.backgroundColor = warnColor.cgColor
+                setContentAlpha(1)
+            case "stale":
+                statusText = "信号中断 · \(ageText(age))"
+                statusColor = seriousColor
+                statusDot.layer?.backgroundColor = seriousColor.cgColor
+                setContentAlpha(0.6)
+            default:
+                statusText = state?.statusLabel ?? "等待心率"
+                statusColor = mutedColor
+                statusDot.layer?.backgroundColor = mutedColor.cgColor
+                setContentAlpha(0.7)
+            }
+        } else {
+            bpmText = "--"
+            statusText = state?.statusLabel ?? "正在连接"
+            statusColor = mutedColor
+            statusDot.layer?.backgroundColor = mutedColor.cgColor
+            setContentAlpha(0.7)
+        }
+
+        applyText()
+        heart.update(bpm: connected ? bpm : nil)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        pill.frame = bounds
+
+        let s = scale
+        let padX = 18 * s
+        let padY = 12 * s
+        let heartW = 30 * s
+        let heartH = 27 * s
+        let gap = 12 * s
+        let bpmWidth = measure("000", font: bpmFont).width + labelPadding
+        let bpmHeight = measure("0", font: bpmFont).height
+        let unitMeasured = measure("BPM", font: unitFont, kern: 1.8 * s)
+        let unitSize = NSSize(width: unitMeasured.width + labelPadding, height: unitMeasured.height)
+        let statusHeight = measure("0", font: statusFont).height
+        let mainHeight = max(heartH, bpmHeight)
+        let bpmX = padX + heartW + gap
+        let bpmY = padY + statusHeight + 5 * s
+
+        heart.frame = NSRect(
+            x: padX,
+            y: bpmY + (mainHeight - heartH) / 2,
+            width: heartW,
+            height: heartH
+        )
+        bpmLabel.frame = NSRect(x: bpmX, y: bpmY, width: bpmWidth, height: bpmHeight)
+        unitLabel.frame = NSRect(
+            x: bpmLabel.frame.maxX + 6 * s,
+            y: bpmY - bpmFont.descender + unitFont.descender,
+            width: unitSize.width,
+            height: unitSize.height
+        )
+
+        let dotSize = 6 * s
+        statusDot.frame = NSRect(
+            x: bpmX,
+            y: padY + (statusHeight - dotSize) / 2,
+            width: dotSize,
+            height: dotSize
+        )
+        statusDot.layer?.cornerRadius = dotSize / 2
+        statusLabel.frame = NSRect(
+            x: statusDot.frame.maxX + 5 * s,
+            y: padY,
+            width: max(0, bounds.width - (statusDot.frame.maxX + 5 * s) - padX),
+            height: statusHeight
+        )
+
+        let gripSide = 12 * s
+        gripView.frame = NSRect(
+            x: bounds.maxX - gripSide - 14 * s,
+            y: 12 * s,
+            width: gripSide,
+            height: gripSide
+        )
+    }
+
+    private func updateFonts() {
+        bpmFont = NSFont.monospacedDigitSystemFont(ofSize: 64 * scale, weight: .semibold)
+        unitFont = NSFont.systemFont(ofSize: 10 * scale, weight: .medium)
+        statusFont = NSFont.systemFont(ofSize: 11 * scale, weight: .regular)
+        pill.layer?.cornerRadius = 22 * scale
+        applyText()
+    }
+
+    private func applyText() {
+        bpmLabel.attributedStringValue = styled(bpmText, font: bpmFont, color: .white)
+        unitLabel.attributedStringValue = styled(
+            "BPM",
+            font: unitFont,
+            color: NSColor.white.withAlphaComponent(0.62),
+            kern: 1.8 * scale
+        )
+        statusLabel.attributedStringValue = styled(statusText, font: statusFont, color: statusColor)
+    }
+
+    private func setContentAlpha(_ value: CGFloat) {
+        heart.alphaValue = value
+        bpmLabel.alphaValue = value
+        unitLabel.alphaValue = value
+        statusDot.alphaValue = value
+        statusLabel.alphaValue = value
+    }
+
+    private func ageText(_ milliseconds: Int?) -> String {
+        guard let milliseconds else { return "刚刚" }
+        if milliseconds < 1500 { return "刚刚" }
+        if milliseconds < 60000 {
+            return "\(max(1, Int((Double(milliseconds) / 1000).rounded()))) 秒前"
+        }
+        return "\(max(1, milliseconds / 60000)) 分钟前"
+    }
+
+    private func styled(
+        _ text: String,
+        font: NSFont,
+        color: NSColor,
+        kern: CGFloat = 0
+    ) -> NSAttributedString {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        var attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .shadow: shadow
+        ]
+        if kern != 0 { attributes[.kern] = kern }
+        return NSAttributedString(string: text, attributes: attributes)
+    }
+
+    private func measure(_ text: String, font: NSFont, kern: CGFloat = 0) -> NSSize {
+        var attributes: [NSAttributedString.Key: Any] = [.font: font]
+        if kern != 0 { attributes[.kern] = kern }
+        return (text as NSString).size(withAttributes: attributes)
+    }
+}
+
+// MARK: - App
+
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var window: FloatWindow!
+    private var floatView: FloatView!
+    private var statusItem: NSStatusItem!
+    private var settingsMenu: NSMenu!
+    private var pollTimer: Timer?
+    private var isPolling = false
+    private var lastState: HeartRateState?
+    private var backendReachable = false
+    private var backendProcess: Process?
+    private var backendLogHandle: FileHandle?
+    private var signalSource: DispatchSourceSignal?
+
+    private let defaults = UserDefaults.standard
+    private var port = 3030
+    private var userVisible = true
+    private var locked = false
+    private var scale: CGFloat = 1.0
+    private var transparentBackground = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        parseArguments()
+        loadSettings()
+        buildStatusItem()
+        buildWindow()
+        observeTermination()
+        startPolling()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self, !self.backendReachable else { return }
+            self.ensureBackend()
+        }
+    }
+
+    private func observeTermination() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            NSApp.terminate(nil)
+        }
+        source.resume()
+        signalSource = source
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        pollTimer?.invalidate()
+        saveWindowFrame()
+        backendLogHandle?.closeFile()
+        backendLogHandle = nil
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !userVisible {
+            userVisible = true
+            saveSettings()
+        }
+        updateVisibility()
+        window.orderFrontRegardless()
+        return true
+    }
+
+    private func parseArguments() {
+        if let env = ProcessInfo.processInfo.environment["MIBAND_HR_PORT"],
+           let parsed = Int(env),
+           (1...65535).contains(parsed) {
+            port = parsed
+        }
+        var args = CommandLine.arguments.dropFirst().makeIterator()
+        while let arg = args.next() {
+            if arg == "--port", let value = args.next(), let parsed = Int(value), (1...65535).contains(parsed) {
+                port = parsed
+            }
+        }
+    }
+
+    private func loadSettings() {
+        if defaults.object(forKey: "float.visible") != nil {
+            userVisible = defaults.bool(forKey: "float.visible")
+        }
+        locked = defaults.bool(forKey: "float.locked")
+        if defaults.object(forKey: "float.scale") != nil {
+            scale = CGFloat(defaults.double(forKey: "float.scale"))
+        }
+        if !(0.6...2.0).contains(scale) {
+            scale = 1.0
+        }
+        transparentBackground = defaults.bool(forKey: "float.transparent")
+    }
+
+    private func saveSettings() {
+        defaults.set(userVisible, forKey: "float.visible")
+        defaults.set(locked, forKey: "float.locked")
+        defaults.set(Double(scale), forKey: "float.scale")
+        defaults.set(transparentBackground, forKey: "float.transparent")
+    }
+
+    private func buildStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem.button {
+            let image = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: "心率浮窗")
+            image?.isTemplate = true
+            button.image = image
+            button.toolTip = "心率浮窗"
+        }
+        settingsMenu = makeMenu()
+        settingsMenu.delegate = self
+        statusItem.menu = settingsMenu
+    }
+
+    private func buildWindow() {
+        floatView = FloatView(frame: NSRect(origin: .zero, size: NSSize(width: 240, height: 96)))
+        floatView.scale = scale
+        floatView.transparentBackground = transparentBackground
+        floatView.makeMenu = { [weak self] in self?.makeMenu() ?? NSMenu() }
+        floatView.onPositionChanged = { [weak self] in
+            self?.saveSettings()
+            self?.saveWindowFrame()
+        }
+        floatView.onInteractiveScaleChanged = { [weak self] value in
+            self?.scale = value
+        }
+        floatView.showResizeGrip = !locked
+
+        let size = floatView.preferredSize
+        let frame = restoredFrame(size: size)
+        window = FloatWindow(contentRect: frame)
+        window.contentView = floatView
+        window.setContentSize(size)
+        window.setFrame(frame, display: false)
+        window.ignoresMouseEvents = locked
+        floatView.needsLayout = true
+        updateVisibility()
+        window.orderFrontRegardless()
+    }
+
+    private func restoredFrame(size: NSSize) -> NSRect {
+        if let saved = defaults.string(forKey: "float.frame") {
+            let rect = NSRectFromString(saved)
+            let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(rect) }
+            if rect.width > 40, rect.height > 30, visible {
+                return NSRect(x: rect.origin.x, y: rect.origin.y, width: size.width, height: size.height)
+            }
+        }
+        return defaultFrame(size: size)
+    }
+
+    private func defaultFrame(size: NSSize) -> NSRect {
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return NSRect(
+            x: screen.maxX - size.width - 24,
+            y: screen.maxY - size.height - 24,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    private func saveWindowFrame() {
+        guard window != nil else { return }
+        defaults.set(NSStringFromRect(window.frame), forKey: "float.frame")
+    }
+
+    private func resizeWindowKeepingTopRight() {
+        guard window != nil else { return }
+        let size = floatView.preferredSize
+        var frame = window.frame
+        frame.origin.x = frame.maxX - size.width
+        frame.origin.y = frame.maxY - size.height
+        frame.size = size
+        window.setFrame(frame, display: true)
+        floatView.needsLayout = true
+        saveWindowFrame()
+    }
+
+    private func updateVisibility() {
+        guard window != nil else { return }
+        let shouldShow = userVisible
+        if shouldShow {
+            if !window.isVisible {
+                window.orderFrontRegardless()
+            }
+            window.ignoresMouseEvents = locked
+        } else if window.isVisible {
+            window.orderOut(nil)
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let fresh = makeMenu()
+        menu.removeAllItems()
+        for item in fresh.items {
+            menu.addItem(item)
+        }
+    }
+
+    private var projectRoot: URL? {
+        let bundle = Bundle.main.bundleURL
+        let root = bundle.deletingLastPathComponent().deletingLastPathComponent()
+        let binary = root.appendingPathComponent("bin/miband-hr-mac")
+        return FileManager.default.isExecutableFile(atPath: binary.path) ? root : nil
+    }
+
+    private func ensureBackend(force: Bool = false) {
+        guard !backendReachable else { return }
+        if !force, let process = backendProcess, process.isRunning { return }
+        guard let root = projectRoot else { return }
+        let binary = root.appendingPathComponent("bin/miband-hr-mac")
+        let dataDir = root.appendingPathComponent("data")
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+
+        let logURL = dataDir.appendingPathComponent("app.log")
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        backendLogHandle?.closeFile()
+        let logHandle = try? FileHandle(forWritingTo: logURL)
+        _ = try? logHandle?.seekToEnd()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        logHandle?.write("===== \(stamp) 浮窗自动启动 =====\n".data(using: .utf8)!)
+
+        let process = Process()
+        process.executableURL = binary
+        process.currentDirectoryURL = root
+        process.arguments = ["--no-open", "--port", String(port)]
+        process.standardOutput = logHandle
+        process.standardError = logHandle
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.backendReachable = false
+            }
+        }
+
+        do {
+            try process.run()
+            backendProcess = process
+            backendLogHandle = logHandle
+            let pidFile = dataDir.appendingPathComponent("app.pid")
+            try? String(process.processIdentifier).write(to: pidFile, atomically: true, encoding: .utf8)
+        } catch {
+            logHandle?.closeFile()
+            backendLogHandle = nil
+        }
+    }
+
+    private func stopBackend() {
+        if let process = backendProcess, process.isRunning {
+            let pid = process.processIdentifier
+            process.terminate()
+            scheduleForceKill(pid)
+        } else if let pid = backendPid(), isBackendProcess(pid) {
+            Darwin.kill(pid, SIGTERM)
+            scheduleForceKill(pid)
+        } else if let pid = portListenerPid(), isBackendProcess(pid) {
+            Darwin.kill(pid, SIGTERM)
+            scheduleForceKill(pid)
+        }
+
+        backendProcess = nil
+        backendLogHandle?.closeFile()
+        backendLogHandle = nil
+        backendReachable = false
+        floatView.update(state: lastState, connected: false)
+        updateVisibility()
+        if let root = projectRoot {
+            try? FileManager.default.removeItem(at: root.appendingPathComponent("data/app.pid"))
+        }
+    }
+
+    private func scheduleForceKill(_ pid: Int32) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            if Darwin.kill(pid, 0) == 0 {
+                Darwin.kill(pid, SIGKILL)
+            }
+        }
+    }
+
+    private func backendPid() -> Int32? {
+        guard let root = projectRoot else { return nil }
+        let path = root.appendingPathComponent("data/app.pid")
+        guard let content = try? String(contentsOf: path, encoding: .utf8),
+              let pid = Int32(content.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return nil
+        }
+        return pid
+    }
+
+    private func portListenerPid() -> Int32? {
+        guard let output = runProcess("/usr/sbin/lsof", ["-tiTCP:\(port)", "-sTCP:LISTEN"]),
+              let first = output.split(whereSeparator: { $0.isNewline }).first,
+              let pid = Int32(first) else {
+            return nil
+        }
+        return pid
+    }
+
+    private func isBackendProcess(_ pid: Int32) -> Bool {
+        guard let output = runProcess("/bin/ps", ["-p", String(pid), "-o", "command="]) else {
+            return false
+        }
+        return output.contains("miband-hr-mac")
+    }
+
+    private func runProcess(_ path: String, _ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func startPolling() {
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+        RunLoop.main.add(pollTimer!, forMode: .common)
+        poll()
+    }
+
+    private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
+        guard let url = URL(string: "http://127.0.0.1:\(port)/api/state?minutes=5") else {
+            isPolling = false
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.isPolling = false
+                if let data, let state = try? JSONDecoder().decode(HeartRateState.self, from: data) {
+                    self.backendReachable = true
+                    self.lastState = state
+                    self.applyState(connected: true)
+                } else {
+                    self.backendReachable = false
+                    self.applyState(connected: false)
+                }
+            }
+        }.resume()
+    }
+
+    private func applyState(connected: Bool) {
+        floatView.update(state: lastState, connected: connected)
+        updateVisibility()
+        let bpm = lastState?.bpm
+        let label = lastState?.statusLabel ?? (connected ? "等待数据" : "后端未运行")
+        statusItem.button?.toolTip = bpm.map { "心率 \($0) BPM · \(label)" } ?? "心率浮窗 · \(label)"
+    }
+
+    @objc private func toggleVisible() {
+        userVisible.toggle()
+        saveSettings()
+        updateVisibility()
+    }
+
+    @objc private func toggleLocked() {
+        locked.toggle()
+        saveSettings()
+        floatView.showResizeGrip = !locked
+        window.ignoresMouseEvents = locked
+        updateVisibility()
+    }
+
+    @objc private func toggleTransparent() {
+        transparentBackground.toggle()
+        floatView.transparentBackground = transparentBackground
+        saveSettings()
+    }
+
+    @objc private func setScale(_ sender: NSMenuItem) {
+        guard let value = (sender.representedObject as? NSNumber)?.doubleValue else { return }
+        scale = CGFloat(value)
+        floatView.scale = scale
+        saveSettings()
+        resizeWindowKeepingTopRight()
+    }
+
+    @objc private func openPanel() {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/") else { return }
+        let edge = URL(fileURLWithPath: "/Applications/Microsoft Edge.app")
+        if FileManager.default.fileExists(atPath: edge.path) {
+            NSWorkspace.shared.open(
+                [url],
+                withApplicationAt: edge,
+                configuration: NSWorkspace.OpenConfiguration()
+            )
+        } else {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func resetPosition() {
+        window.setFrame(defaultFrame(size: floatView.preferredSize), display: true)
+        saveWindowFrame()
+    }
+
+    @objc private func startBackend() {
+        backendReachable = false
+        ensureBackend(force: true)
+    }
+
+    @objc private func stopBackendAction() {
+        stopBackend()
+    }
+
+    @objc private func restartBackend() {
+        stopBackend()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.ensureBackend(force: true)
+        }
+    }
+
+    @objc private func openBluetoothSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth") else {
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func quit() {
+        saveWindowFrame()
+        NSApp.terminate(nil)
+    }
+
+    @objc private func quitAndStopBackend() {
+        stopBackend()
+        saveWindowFrame()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func makeMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        addToggle(to: menu, title: "显示浮窗", action: #selector(toggleVisible), on: userVisible)
+        addToggle(to: menu, title: "锁定位置（点击穿透）", action: #selector(toggleLocked), on: locked)
+        addToggle(to: menu, title: "纯透明背景", action: #selector(toggleTransparent), on: transparentBackground)
+        menu.addItem(.separator())
+
+        let sizeItem = NSMenuItem(title: "大小", action: nil, keyEquivalent: "")
+        let sizeMenu = NSMenu()
+        for (title, value) in [("小", 0.8), ("中", 1.0), ("大", 1.3), ("特大", 1.6)] {
+            let item = NSMenuItem(title: title, action: #selector(setScale(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = NSNumber(value: value)
+            item.state = abs(scale - CGFloat(value)) < 0.01 ? .on : .off
+            sizeMenu.addItem(item)
+        }
+        sizeItem.submenu = sizeMenu
+        menu.addItem(sizeItem)
+
+        menu.addItem(.separator())
+        if backendReachable {
+            addAction(to: menu, title: "停止后台服务", action: #selector(stopBackendAction))
+            addAction(to: menu, title: "重启后台服务", action: #selector(restartBackend))
+        } else {
+            addAction(to: menu, title: "启动后台服务", action: #selector(startBackend))
+        }
+        addAction(to: menu, title: "蓝牙权限设置", action: #selector(openBluetoothSettings))
+        addAction(to: menu, title: "打开网页面板", action: #selector(openPanel))
+        addAction(to: menu, title: "重置位置", action: #selector(resetPosition))
+
+        menu.addItem(.separator())
+        addAction(to: menu, title: "退出浮窗", action: #selector(quit))
+        addAction(to: menu, title: "退出并停止后台服务", action: #selector(quitAndStopBackend))
+        return menu
+    }
+
+    @discardableResult
+    private func addAction(to menu: NSMenu, title: String, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return item
+    }
+
+    private func addToggle(to menu: NSMenu, title: String, action: Selector, on: Bool) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.state = on ? .on : .off
+        menu.addItem(item)
+    }
+}
+
+// MARK: - 入口
+
+private let application = NSApplication.shared
+private let delegate = AppDelegate()
+application.delegate = delegate
+application.run()
+
+
+

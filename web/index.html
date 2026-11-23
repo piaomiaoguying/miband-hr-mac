@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>心率监听</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #20201f;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --line: #e66767;
+    --good: #0ca30c;
+    --warn: #fab219;
+    --serious: #ec835a;
+    --border: rgba(255, 255, 255, .10);
+    --radius: 20px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--page);
+    background-image:
+      radial-gradient(900px 480px at 12% -12%, rgba(230, 103, 103, .10), transparent 62%),
+      radial-gradient(760px 420px at 102% 2%, rgba(57, 135, 229, .055), transparent 58%);
+    background-attachment: fixed;
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .shell { max-width: 1080px; margin: 0 auto; padding: 28px 22px 36px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; color: var(--ink-2); }
+  .brand-mark { width: 22px; height: 22px; color: var(--line); flex: none; }
+  .brand strong { color: var(--ink); font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+  .brand .sub { color: var(--muted); font-size: 12px; border-left: 1px solid var(--border); padding-left: 10px; }
+  .status {
+    display: inline-flex; align-items: center; gap: 8px; flex: none;
+    padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px;
+    background: rgba(255, 255, 255, .03); font-size: 12px; color: var(--ink-2);
+  }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+  .status.live .status-dot { background: var(--good); box-shadow: 0 0 0 4px rgba(12, 163, 12, .13); animation: pulse 2.2s ease-out infinite; }
+  .status.waiting .status-dot { background: var(--warn); }
+  .status.holding .status-dot { background: var(--warn); }
+  .status.stale .status-dot { background: var(--serious); }
+  .status.scanning .status-dot { background: var(--muted); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(12, 163, 12, .30); } 70% { box-shadow: 0 0 0 7px rgba(12, 163, 12, 0); } 100% { box-shadow: 0 0 0 0 rgba(12, 163, 12, 0); } }
+
+  .error-banner {
+    margin: 0 0 14px; padding: 10px 13px; border: 1px solid rgba(236, 131, 90, .42);
+    border-radius: 10px; background: rgba(236, 131, 90, .08); color: var(--ink-2); font-size: 12px;
+  }
+
+  .hero {
+    display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(250px, .65fr); gap: 18px;
+    padding: 26px 28px; border: 1px solid var(--border); border-radius: 24px;
+    background: linear-gradient(158deg, rgba(230, 103, 103, .075), rgba(255, 255, 255, .018) 46%, rgba(255, 255, 255, .01));
+  }
+  .hero-main { display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+  .bpm-row { display: flex; align-items: flex-end; gap: 12px; margin: 4px 0 8px; }
+  .heart { width: 34px; height: 34px; margin-bottom: 17px; color: var(--line); flex: none; animation: beat var(--beat, 1.15s) ease-in-out infinite; transform-origin: 50% 55%; filter: drop-shadow(0 0 16px rgba(230, 103, 103, .38)); }
+  @keyframes beat { 0%, 100% { transform: scale(1); } 12% { transform: scale(1.13); } 24% { transform: scale(1); } 36% { transform: scale(1.06); } 48% { transform: scale(1); } }
+  .bpm { font-size: clamp(76px, 11vw, 132px); line-height: .84; font-weight: 600; letter-spacing: -.055em; transition: opacity .2s; }
+  .unit { font-size: 11px; letter-spacing: .15em; color: var(--muted); padding-bottom: 17px; font-weight: 500; }
+  .device-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 20px; color: var(--ink-2); font-size: 13px; }
+  .dot-sep { color: var(--axis); }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; align-self: center; overflow: hidden; border: 1px solid var(--border); border-radius: 15px; background: var(--border); }
+  .stat { min-width: 0; padding: 14px 16px; background: rgba(17, 17, 16, .78); }
+  .stat-label { display: block; color: var(--muted); font-size: 11px; letter-spacing: .05em; }
+  .stat-value { display: block; margin-top: 5px; color: var(--ink); font-size: 22px; font-weight: 600; }
+  .stat-value small { margin-left: 3px; color: var(--muted); font-size: 10px; font-weight: 500; letter-spacing: .06em; }
+
+  .card { margin-top: 16px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 22px 0; }
+  .card-title { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+  .card-sub { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+  .range { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255, 255, 255, .025); }
+  .range button { appearance: none; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; padding: 6px 9px; cursor: pointer; }
+  .range button:hover { color: var(--ink-2); }
+  .range button[aria-pressed="true"] { background: rgba(255, 255, 255, .09); color: var(--ink); }
+  .range button:focus-visible, .actions a:focus-visible, .table-view summary:focus-visible { outline: 2px solid var(--line); outline-offset: 2px; }
+  .chart-wrap { position: relative; padding: 12px 16px 6px; }
+  #chart { display: block; width: 100%; height: 300px; cursor: crosshair; touch-action: none; }
+  #chart:focus-visible { outline: 2px solid var(--line); outline-offset: 2px; border-radius: 8px; }
+  .tooltip { position: absolute; z-index: 3; transform: translate(-50%, -100%); pointer-events: none; white-space: nowrap; padding: 7px 9px; border: 1px solid var(--border); border-radius: 9px; background: #0b0b0b; box-shadow: 0 8px 24px rgba(0, 0, 0, .38); color: var(--ink-2); font-size: 11px; }
+  .tooltip strong { display: block; margin-bottom: 2px; color: var(--ink); font-size: 15px; font-weight: 600; line-height: 1.15; }
+  .empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding-top: 10px; text-align: center; color: var(--muted); font-size: 12px; pointer-events: none; }
+  .empty strong { color: var(--ink-2); font-size: 13px; font-weight: 500; }
+  .table-view { margin: 0 22px 20px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .table-view summary { cursor: pointer; list-style: none; color: var(--muted); font-size: 12px; }
+  .table-view summary::-webkit-details-marker { display: none; }
+  .table-view summary::after { content: "展开"; float: right; color: var(--axis); }
+  .table-view[open] summary::after { content: "收起"; }
+  .table-scroll { max-height: 220px; margin-top: 10px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 7px 8px; border-bottom: 1px solid var(--grid); text-align: left; }
+  th { position: sticky; top: 0; background: var(--surface); color: var(--muted); font-weight: 500; }
+  th:last-child, td:last-child { text-align: right; }
+
+  .meta-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+  .meta { min-width: 0; padding: 13px 15px; border: 1px solid var(--border); border-radius: 14px; background: rgba(255, 255, 255, .018); }
+  .meta-label { display: block; color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+  .meta-value { display: block; margin-top: 6px; overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+  .meta-sub { display: block; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .02em; }
+  .actions { display: flex; flex-direction: column; justify-content: center; gap: 7px; }
+  .actions a { padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--ink-2); font-size: 12px; text-align: center; text-decoration: none; }
+  .actions a:hover { background: rgba(255, 255, 255, .04); color: var(--ink); }
+  .footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 18px; color: var(--muted); font-size: 11px; }
+  .disconnected .hero, .disconnected .card, .disconnected .meta-grid { opacity: .72; transition: opacity .2s; }
+  .is-idle .bpm, .is-idle .heart { opacity: .45; }
+
+  @media (max-width: 780px) {
+    .shell { padding: 22px 16px 30px; }
+    .hero { grid-template-columns: 1fr; padding: 22px; }
+    .stats { grid-template-columns: repeat(4, 1fr); }
+    .stat { padding: 12px 10px; }
+    .stat-value { font-size: 18px; }
+    .meta-grid { grid-template-columns: 1fr 1fr; }
+    .brand .sub { display: none; }
+  }
+  @media (max-width: 520px) {
+    .stats { grid-template-columns: 1fr 1fr; }
+    .bpm { font-size: 84px; }
+    .heart { width: 28px; height: 28px; margin-bottom: 13px; }
+    .card-head { flex-direction: column; }
+    .range { align-self: flex-start; }
+    .topbar { align-items: flex-start; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 29" aria-hidden="true"><path fill="currentColor" d="M16 29S1 19.6 1 9.9C1 4.9 4.8 1 9.7 1c2.7 0 5.2 1.3 6.3 3.4C17.1 2.3 19.6 1 22.3 1 27.2 1 31 4.9 31 9.9 31 19.6 16 29 16 29z"/></svg>
+      <strong>心率监听</strong>
+      <span class="sub">Mi Band 5</span>
+    </div>
+    <div class="status scanning" id="status"><span class="status-dot"></span><span id="status-text">正在扫描</span></div>
+  </header>
+
+  <div class="error-banner" id="error" hidden></div>
+
+  <section class="hero" id="hero">
+    <div class="hero-main">
+      <div class="bpm-row">
+        <svg class="heart" id="heart" viewBox="0 0 32 29" aria-hidden="true"><path fill="currentColor" d="M16 29S1 19.6 1 9.9C1 4.9 4.8 1 9.7 1c2.7 0 5.2 1.3 6.3 3.4C17.1 2.3 19.6 1 22.3 1 27.2 1 31 4.9 31 9.9 31 19.6 16 29 16 29z"/></svg>
+        <span class="bpm" id="bpm">--</span>
+        <span class="unit">BPM</span>
+      </div>
+      <div class="device-line">
+        <span id="device-name">等待手环广播</span>
+        <span class="dot-sep">·</span>
+        <span id="updated">--</span>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><span class="stat-label">本次最低</span><span class="stat-value" id="stat-min">--<small>BPM</small></span></div>
+      <div class="stat"><span class="stat-label">本次平均</span><span class="stat-value" id="stat-avg">--<small>BPM</small></span></div>
+      <div class="stat"><span class="stat-label">本次最高</span><span class="stat-value" id="stat-max">--<small>BPM</small></span></div>
+      <div class="stat"><span class="stat-label">样本</span><span class="stat-value" id="stat-count">--<small>条</small></span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2 class="card-title">心率趋势</h2>
+        <p class="card-sub" id="chart-sub">最近 10 分钟 · BPM</p>
+      </div>
+      <div class="range" role="group" aria-label="时间范围">
+        <button type="button" data-minutes="5">5 分钟</button>
+        <button type="button" data-minutes="10" aria-pressed="true">10 分钟</button>
+        <button type="button" data-minutes="30">30 分钟</button>
+        <button type="button" data-minutes="60">60 分钟</button>
+      </div>
+    </div>
+    <div class="chart-wrap" id="chart-wrap">
+      <canvas id="chart" tabindex="0" role="img" aria-label="最近 10 分钟心率折线图"></canvas>
+      <div class="tooltip" id="tooltip" hidden><strong id="tooltip-bpm">--</strong><span id="tooltip-time">--</span></div>
+      <div class="empty" id="empty"><strong>等待心率数据</strong><span>开启运动心率广播并开始一项运动</span></div>
+    </div>
+    <details class="table-view">
+      <summary>数据表</summary>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>时间</th><th>心率</th></tr></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+
+  <section class="meta-grid">
+    <div class="meta"><span class="meta-label">设备</span><span class="meta-value" id="meta-device">--</span><span class="meta-sub mono" id="meta-id">--</span></div>
+    <div class="meta"><span class="meta-label">信号强度</span><span class="meta-value" id="meta-rssi">--</span><span class="meta-sub">RSSI</span></div>
+    <div class="meta"><span class="meta-label">原始广播</span><span class="meta-value mono" id="meta-raw">--</span><span class="meta-sub" id="meta-source">company 0x0157 · byte 3</span></div>
+    <div class="meta actions"><a href="/api/export.csv" download>导出 CSV</a><a href="/overlay" target="_blank" rel="noopener">OBS 悬浮层</a></div>
+  </section>
+
+  <footer class="footer">
+    <span>本机运行 · 数据只写入本地 CSV</span>
+    <span id="footer-csv">--</span>
+  </footer>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+  const statusEl = $("status");
+  const statusText = $("status-text");
+  const bpmEl = $("bpm");
+  const heartEl = $("heart");
+  const deviceEl = $("device-name");
+  const updatedEl = $("updated");
+  const chart = $("chart");
+  const chartWrap = $("chart-wrap");
+  const tooltip = $("tooltip");
+  const tooltipBpm = $("tooltip-bpm");
+  const tooltipTime = $("tooltip-time");
+  const emptyEl = $("empty");
+  const tableBody = $("table-body");
+  const errorEl = $("error");
+
+  const STATUS = {
+    live: ["实时", "live"],
+    holding: ["保持中", "holding"],
+    waiting: ["等待心率", "waiting"],
+    stale: ["信号中断", "stale"],
+    scanning: ["正在扫描", "scanning"],
+  };
+  const SOURCE = { adv: "运动心率广播", gatt: "标准心率服务", mock: "模拟数据" };
+
+  const model = {
+    range: 10,
+    latest: null,
+    points: [],
+    hover: -1,
+    geometry: null,
+    drawQueued: false,
+  };
+
+  function setStatus(code, label) {
+    statusEl.className = `status ${code}`;
+    statusText.textContent = label;
+  }
+
+  function ageText(ms) {
+    if (ms === null || ms === undefined) return "--";
+    if (ms < 1500) return "刚刚";
+    if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} 秒前`;
+    return `${Math.floor(ms / 60000)} 分钟前`;
+  }
+
+  function formatTime(epochMs) {
+    return new Date(epochMs).toLocaleTimeString("zh-CN", { hour12: false });
+  }
+
+  function text(el, value) {
+    el.textContent = value === null || value === undefined || value === "" ? "--" : String(value);
+  }
+
+  function renderTable(samples) {
+    tableBody.replaceChildren();
+    const recent = samples.slice(-20).reverse();
+    if (!recent.length) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.colSpan = 2;
+      cell.textContent = "暂无数据";
+      cell.style.color = "var(--muted)";
+      row.appendChild(cell);
+      tableBody.appendChild(row);
+      return;
+    }
+    for (const sample of recent) {
+      const row = document.createElement("tr");
+      const time = document.createElement("td");
+      const bpm = document.createElement("td");
+      time.textContent = formatTime(sample.t);
+      bpm.textContent = `${sample.bpm} BPM`;
+      row.append(time, bpm);
+      tableBody.appendChild(row);
+    }
+  }
+
+  function render(data) {
+    model.latest = data;
+    const status = STATUS[data.status] || STATUS.scanning;
+    setStatus(status[1], status[0]);
+    const fresh = data.status === "live" || data.status === "holding";
+    document.body.classList.toggle("is-idle", !fresh);
+    document.body.classList.toggle("disconnected", false);
+
+    const bpm = Number.isFinite(data.bpm) ? data.bpm : null;
+    bpmEl.textContent = bpm === null ? "--" : String(bpm);
+    if (bpm !== null && fresh) {
+      heartEl.style.setProperty("--beat", `${clamp(60 / bpm, 0.38, 1.4)}s`);
+      document.title = `${bpm} BPM · 心率监听`;
+    } else {
+      heartEl.style.setProperty("--beat", "1.15s");
+      document.title = bpm === null ? "心率监听" : `${bpm} BPM · 心率监听`;
+    }
+
+    deviceEl.textContent = data.device_name || "等待手环广播";
+    updatedEl.textContent = ageText(data.last_valid_age_ms);
+
+    const session = data.session || {};
+    $("stat-min").replaceChildren(document.createTextNode(session.min ?? "--"), Object.assign(document.createElement("small"), { textContent: "BPM" }));
+    $("stat-avg").replaceChildren(document.createTextNode(session.avg == null ? "--" : Math.round(session.avg)), Object.assign(document.createElement("small"), { textContent: "BPM" }));
+    $("stat-max").replaceChildren(document.createTextNode(session.max ?? "--"), Object.assign(document.createElement("small"), { textContent: "BPM" }));
+    $("stat-count").replaceChildren(document.createTextNode(session.count ?? "--"), Object.assign(document.createElement("small"), { textContent: "条" }));
+
+    text($("meta-device"), data.device_name || "--");
+    text($("meta-id"), data.device_id || "--");
+    text($("meta-rssi"), data.rssi == null ? "--" : `${data.rssi} dBm`);
+    text($("meta-raw"), data.raw_hex || "--");
+    $("meta-source").textContent = data.source === "gatt"
+      ? "标准心率服务 0x180D"
+      : `company 0x0157 · byte ${data.offset}`;
+    $("footer-csv").textContent = data.csv_path || "--";
+    $("chart-sub").textContent = `最近 ${model.range} 分钟 · BPM`;
+
+    if (data.last_error) {
+      errorEl.hidden = false;
+      errorEl.textContent = data.last_error;
+    } else {
+      errorEl.hidden = true;
+    }
+
+    model.points = (data.samples || []).filter((sample) => Number.isFinite(sample.t) && Number.isFinite(sample.bpm));
+    emptyEl.style.display = model.points.length ? "none" : "flex";
+    renderTable(model.points);
+    queueDraw();
+  }
+
+  function queueDraw() {
+    if (model.drawQueued) return;
+    model.drawQueued = true;
+    setTimeout(() => {
+      model.drawQueued = false;
+      drawChart();
+    }, 0);
+  }
+
+  function niceStep(range, target) {
+    const raw = range / target;
+    for (const step of [5, 10, 20, 25, 50, 100]) {
+      if (step >= raw) return step;
+    }
+    return 100;
+  }
+
+  function roundedRect(ctx, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + width, y, x + width, y + height, r);
+    ctx.arcTo(x + width, y + height, x, y + height, r);
+    ctx.arcTo(x, y + height, x, y, r);
+    ctx.arcTo(x, y, x + width, y, r);
+    ctx.closePath();
+  }
+
+  function drawChart() {
+    const rect = chart.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    chart.width = Math.round(rect.width * dpr);
+    chart.height = Math.round(rect.height * dpr);
+    const ctx = chart.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const width = rect.width;
+    const height = rect.height;
+    const pad = { left: 44, right: 58, top: 18, bottom: 30 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+    if (plotW <= 10 || plotH <= 10) return;
+
+    const now = Date.now();
+    const end = now;
+    const start = now - model.range * 60000;
+    const samples = model.points;
+    if (!samples.length) {
+      model.hover = -1;
+      tooltip.hidden = true;
+    }
+    const values = samples.map((sample) => sample.bpm);
+    let yMin;
+    let yMax;
+    if (values.length) {
+      const lo = Math.min(...values);
+      const hi = Math.max(...values);
+      yMin = Math.max(30, Math.floor((lo - 8) / 20) * 20);
+      yMax = Math.min(220, Math.ceil((hi + 8) / 20) * 20);
+      if (yMax - yMin < 40) {
+        const mid = (yMin + yMax) / 2;
+        yMin = Math.max(30, Math.floor((mid - 20) / 10) * 10);
+        yMax = yMin + 40;
+      }
+    } else {
+      yMin = 60;
+      yMax = 140;
+    }
+    const yStep = niceStep(yMax - yMin, 4);
+    const x = (t) => pad.left + ((t - start) / (end - start)) * plotW;
+    const y = (bpm) => pad.top + (1 - (bpm - yMin) / (yMax - yMin)) * plotH;
+
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "#2c2c2a";
+    ctx.fillStyle = "#898781";
+    ctx.font = "11px -apple-system, system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    const tickStart = Math.ceil(yMin / yStep) * yStep;
+    for (let value = tickStart; value <= yMax; value += yStep) {
+      const yy = Math.round(y(value)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, yy);
+      ctx.lineTo(pad.left + plotW, yy);
+      ctx.stroke();
+      ctx.fillText(String(value), pad.left - 9, yy);
+    }
+
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "center";
+    const xTicks = width < 480 ? 2 : width < 760 ? 3 : 4;
+    for (let i = 0; i < xTicks; i += 1) {
+      const t = start + ((end - start) * i) / (xTicks - 1);
+      const xx = x(t);
+      const label = new Date(t).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+      ctx.fillText(label, clamp(xx, pad.left + 24, pad.left + plotW - 24), height - 9);
+    }
+
+    ctx.strokeStyle = "#383835";
+    ctx.beginPath();
+    ctx.moveTo(pad.left, pad.top + plotH + 0.5);
+    ctx.lineTo(pad.left + plotW, pad.top + plotH + 0.5);
+    ctx.stroke();
+
+    if (!samples.length) {
+      model.geometry = { pad, plotW, plotH, start, end, xMin: yMin, xMax: yMax, y, x };
+      tooltip.hidden = true;
+      return;
+    }
+
+    const visible = samples.filter((sample) => sample.t >= start - 2000 && sample.t <= end + 2000);
+    if (model.hover >= visible.length) {
+      model.hover = -1;
+      tooltip.hidden = true;
+    }
+    const intervals = [];
+    for (let index = 1; index < visible.length; index += 1) {
+      intervals.push(visible[index].t - visible[index - 1].t);
+    }
+    intervals.sort((a, b) => a - b);
+    const medianInterval = intervals.length ? intervals[Math.floor(intervals.length / 2)] : 1000;
+    const gapLimit = Math.max(5000, medianInterval * 3);
+    const segments = [];
+    let current = [];
+    for (const sample of visible) {
+      if (current.length && sample.t - current[current.length - 1].t > gapLimit) {
+        segments.push(current);
+        current = [];
+      }
+      current.push(sample);
+    }
+    if (current.length) segments.push(current);
+
+    const surface = "#1a1a19";
+    const line = "#e66767";
+    for (const segment of segments) {
+      if (segment.length < 2) continue;
+      const first = segment[0];
+      const last = segment[segment.length - 1];
+      const area = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+      area.addColorStop(0, "rgba(230, 103, 103, .17)");
+      area.addColorStop(1, "rgba(230, 103, 103, .015)");
+      ctx.beginPath();
+      ctx.moveTo(x(first.t), y(first.bpm));
+      for (const sample of segment.slice(1)) ctx.lineTo(x(sample.t), y(sample.bpm));
+      ctx.lineTo(x(last.t), pad.top + plotH);
+      ctx.lineTo(x(first.t), pad.top + plotH);
+      ctx.closePath();
+      ctx.fillStyle = area;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(x(first.t), y(first.bpm));
+      for (const sample of segment.slice(1)) ctx.lineTo(x(sample.t), y(sample.bpm));
+      ctx.strokeStyle = line;
+      ctx.lineWidth = 2;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+    }
+
+    const last = visible[visible.length - 1];
+    if (last) {
+      const lx = clamp(x(last.t), pad.left, pad.left + plotW);
+      const ly = y(last.bpm);
+      ctx.beginPath();
+      ctx.arc(lx, ly, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = line;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = surface;
+      ctx.stroke();
+
+      const label = String(last.bpm);
+      ctx.font = "600 11px -apple-system, system-ui, sans-serif";
+      const labelWidth = ctx.measureText(label).width + 14;
+      let labelX = lx + 10;
+      if (labelX + labelWidth > width - 6) labelX = lx - labelWidth - 10;
+      const labelY = clamp(ly - 12, pad.top + 2, pad.top + plotH - 22);
+      roundedRect(ctx, labelX, labelY, labelWidth, 20, 7);
+      ctx.fillStyle = "#1a1a19";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.13)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "#f0efec";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, labelX + labelWidth / 2, labelY + 10.5);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
+    }
+
+    model.geometry = { pad, plotW, plotH, start, end, yMin, yMax, y, x, visible };
+    if (model.hover >= 0) drawHover();
+  }
+
+  function nearestPoint(clientX) {
+    const geo = model.geometry;
+    if (!geo || !geo.visible || !geo.visible.length) return -1;
+    const rect = chart.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    let best = -1;
+    let bestDistance = Infinity;
+    geo.visible.forEach((sample, index) => {
+      const distance = Math.abs(geo.x(sample.t) - localX);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = index;
+      }
+    });
+    return bestDistance <= 32 ? best : -1;
+  }
+
+  function drawHover() {
+    const geo = model.geometry;
+    if (!geo || !geo.visible || model.hover < 0 || model.hover >= geo.visible.length) return;
+    const sample = geo.visible[model.hover];
+    const ctx = chart.getContext("2d");
+    const px = geo.x(sample.t);
+    const py = geo.y(sample.bpm);
+    ctx.save();
+    ctx.strokeStyle = "rgba(137,135,129,.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(px) + 0.5, geo.pad.top);
+    ctx.lineTo(Math.round(px) + 0.5, geo.pad.top + geo.plotH);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fillStyle = "#e66767";
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#1a1a19";
+    ctx.stroke();
+    ctx.restore();
+
+    tooltipBpm.textContent = `${sample.bpm} BPM`;
+    tooltipTime.textContent = new Date(sample.t).toLocaleTimeString("zh-CN", { hour12: false });
+    const wrapRect = chartWrap.getBoundingClientRect();
+    const chartRect = chart.getBoundingClientRect();
+    const left = chartRect.left - wrapRect.left + px;
+    const top = chartRect.top - wrapRect.top + py - 12;
+    tooltip.style.left = `${clamp(left, 52, wrapRect.width - 52)}px`;
+    tooltip.style.top = `${Math.max(38, top)}px`;
+    tooltip.hidden = false;
+  }
+
+  function hideHover() {
+    model.hover = -1;
+    tooltip.hidden = true;
+    queueDraw();
+  }
+
+  chart.addEventListener("pointermove", (event) => {
+    const index = nearestPoint(event.clientX);
+    if (index < 0) {
+      if (model.hover >= 0) hideHover();
+      return;
+    }
+    if (index !== model.hover) {
+      model.hover = index;
+      queueDraw();
+    }
+  });
+  chart.addEventListener("pointerleave", hideHover);
+  chart.addEventListener("blur", hideHover);
+  chart.addEventListener("keydown", (event) => {
+    if (!model.geometry || !model.geometry.visible || !model.geometry.visible.length) return;
+    const total = model.geometry.visible.length;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const delta = event.key === "ArrowLeft" ? -1 : 1;
+      model.hover = model.hover < 0 ? total - 1 : clamp(model.hover + delta, 0, total - 1);
+      queueDraw();
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      model.hover = 0;
+      queueDraw();
+    } else if (event.key === "End") {
+      event.preventDefault();
+      model.hover = total - 1;
+      queueDraw();
+    } else if (event.key === "Escape") {
+      hideHover();
+    }
+  });
+
+  let resizeTimer = 0;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(queueDraw, 80);
+  });
+
+  document.querySelectorAll(".range button").forEach((button) => {
+    button.addEventListener("click", () => {
+      const minutes = Number(button.dataset.minutes);
+      if (!Number.isFinite(minutes) || minutes === model.range) return;
+      model.range = minutes;
+      model.hover = -1;
+      tooltip.hidden = true;
+      document.querySelectorAll(".range button").forEach((item) => {
+        item.setAttribute("aria-pressed", String(item === button));
+      });
+      $("chart-sub").textContent = `最近 ${minutes} 分钟 · BPM`;
+      chart.setAttribute("aria-label", `最近 ${minutes} 分钟心率折线图`);
+      poll();
+    });
+  });
+
+  let polling = false;
+  async function poll() {
+    if (polling) return;
+    polling = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(`/api/state?minutes=${model.range}`, { cache: "no-store", signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      render(await response.json());
+    } catch (error) {
+      document.body.classList.add("disconnected");
+      setStatus("stale", "连接中断");
+    } finally {
+      clearTimeout(timeout);
+      polling = false;
+    }
+  }
+
+  poll();
+  setInterval(poll, 1000);
+})();
+</script>
+</body>
+</html>
