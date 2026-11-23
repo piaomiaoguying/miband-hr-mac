@@ -54,214 +54,24 @@ private final class FloatWindow: NSPanel {
     }
 }
 
-// MARK: - 心形
-
-private final class HeartView: NSView {
-    private let heartLayer = CALayer()
-    private var bpm: Int?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-        heartLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-        heartLayer.contentsGravity = .resizeAspect
-        heartLayer.contents = makeHeartImage()
-        heartLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-        heartLayer.actions = [
-            "bounds": NSNull(),
-            "position": NSNull(),
-            "contents": NSNull(),
-            "contentsScale": NSNull(),
-            "backgroundColor": NSNull()
-        ]
-        layer?.addSublayer(heartLayer)
-        updateAnimation()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func update(bpm: Int?) {
-        guard self.bpm != bpm else { return }
-        self.bpm = bpm
-        updateAnimation()
-    }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        let size = bounds.size
-        heartLayer.bounds = CGRect(origin: .zero, size: size)
-        heartLayer.position = CGPoint(x: size.width / 2, y: size.height / 2)
-        CATransaction.commit()
-    }
-
-    private func makeHeartImage() -> CGImage? {
-        guard let symbol = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: nil) else {
-            return nil
-        }
-        let size = NSSize(width: 128, height: 128)
-        let image = NSImage(size: size, flipped: false) { rect in
-            symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current?.compositingOperation = .sourceAtop
-            accentColor.setFill()
-            NSBezierPath(rect: rect).fill()
-            NSGraphicsContext.restoreGraphicsState()
-            return true
-        }
-        return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-    }
-
-    private func updateAnimation() {
-        heartLayer.removeAnimation(forKey: "beat")
-        let duration = bpm.map { max(0.38, min(1.4, 60.0 / Double($0))) } ?? 1.15
-        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
-        animation.values = [1.0, 1.13, 1.0, 1.06, 1.0, 1.0]
-        animation.keyTimes = [0, 0.12, 0.24, 0.36, 0.48, 1]
-        animation.duration = duration
-        animation.repeatCount = .infinity
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        heartLayer.add(animation, forKey: "beat")
-    }
-}
-
-// MARK: - 文字
-
-private final class LabelView: NSView {
-    var text: NSAttributedString? {
-        didSet { redraw() }
-    }
-
-    private let textLayer = CALayer()
-    private var lastPixelSize = CGSize.zero
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-        textLayer.actions = [
-            "contents": NSNull(),
-            "bounds": NSNull(),
-            "position": NSNull(),
-            "contentsScale": NSNull()
-        ]
-        textLayer.magnificationFilter = .linear
-        textLayer.minificationFilter = .linear
-        layer?.addSublayer(textLayer)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func layout() {
-        super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        textLayer.frame = bounds
-        CATransaction.commit()
-        redrawIfNeeded()
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        needsLayout = true
-        redrawIfNeeded()
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        lastPixelSize = .zero
-        redraw()
-    }
-
-    private func redrawIfNeeded() {
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let pixel = CGSize(width: ceil(bounds.width * scale), height: ceil(bounds.height * scale))
-        guard pixel != lastPixelSize else { return }
-        redraw()
-    }
-
-    // 每次更新都重新生成整张位图并整体替换 layer 内容，旧字形没有残留通道。
-    private func redraw() {
-        guard bounds.width > 0.5, bounds.height > 0.5 else { return }
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        let pixelWidth = max(1, Int(ceil(bounds.width * scale)))
-        let pixelHeight = max(1, Int(ceil(bounds.height * scale)))
-        guard let rep = NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: pixelWidth,
-            pixelsHigh: pixelHeight,
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ) else { return }
-        rep.size = bounds.size
-        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return }
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = context
-        text?.draw(at: .zero)
-        NSGraphicsContext.restoreGraphicsState()
-
-        lastPixelSize = CGSize(width: pixelWidth, height: pixelHeight)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        textLayer.contentsScale = scale
-        textLayer.contents = rep.cgImage
-        CATransaction.commit()
-    }
-}
-
-// MARK: - 缩放手柄
-
-private final class GripView: NSView {
-    override var isOpaque: Bool { false }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let width = bounds.width
-        let height = bounds.height
-        guard width > 0, height > 0 else { return }
-        let path = NSBezierPath()
-        path.lineWidth = max(1, width / 10)
-        path.lineCapStyle = .round
-        NSColor.white.withAlphaComponent(0.72).setStroke()
-        path.move(to: NSPoint(x: 0, y: 0))
-        path.line(to: NSPoint(x: width, y: height))
-        path.move(to: NSPoint(x: width * 0.38, y: 0))
-        path.line(to: NSPoint(x: width, y: height * 0.62))
-        path.move(to: NSPoint(x: width * 0.74, y: 0))
-        path.line(to: NSPoint(x: width, y: height * 0.26))
-        path.stroke()
-    }
-}
-
-// MARK: - 浮窗内容
-
 private final class FloatView: NSView {
     var scale: CGFloat = 1 {
         didSet {
             guard scale != oldValue else { return }
             updateFonts()
             needsLayout = true
+            needsDisplay = true
             window?.invalidateCursorRects(for: self)
         }
     }
 
     var transparentBackground = false {
-        didSet { pill.isHidden = transparentBackground }
+        didSet { needsDisplay = true }
     }
 
     var showResizeGrip = true {
         didSet {
-            gripView.isHidden = !showResizeGrip
+            needsDisplay = true
             window?.invalidateCursorRects(for: self)
         }
     }
@@ -270,13 +80,7 @@ private final class FloatView: NSView {
     var onPositionChanged: (() -> Void)?
     var onInteractiveScaleChanged: ((CGFloat) -> Void)?
 
-    private let pill = NSView()
-    private let gripView = GripView()
-    private let heart = HeartView()
-    private let bpmLabel = LabelView()
-    private let unitLabel = LabelView()
-    private let statusLabel = LabelView()
-    private let statusDot = NSView()
+    private let heartLayer = CALayer()
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
     private var resizing = false
@@ -284,20 +88,41 @@ private final class FloatView: NSView {
     private var resizeStartWidth: CGFloat = 0
     private var resizeStartHeight: CGFloat = 0
     private var resizeStartOrigin: NSPoint = .zero
+
     private var bpmFont = NSFont.monospacedDigitSystemFont(ofSize: 64, weight: .semibold)
-    private var unitFont = NSFont.systemFont(ofSize: 10, weight: .medium)
     private var statusFont = NSFont.systemFont(ofSize: 11, weight: .regular)
-    private var bpmText = "--"
+    private var bpmValue: Int?
+    private var bpmText = ""
     private var statusText = "等待手环"
     private var statusColor = mutedColor
-    // NSTextField 的 label cell 自带约 4pt 内边距，这里用固定值，避免小尺寸下按比例缩小后被裁切。
+    private var contentAlpha: CGFloat = 1
     private let labelPadding: CGFloat = 6
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
-        setup()
+        // 禁止本视图图层的隐式动画，避免尺寸变化时旧内容被拉伸残留。
+        layer?.actions = [
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "contents": NSNull(),
+            "sublayers": NSNull(),
+            "frame": NSNull()
+        ]
+        heartLayer.contentsGravity = .resizeAspect
+        heartLayer.contents = makeHeartImage()
+        heartLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        heartLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "transform": NSNull(),
+            "contentsScale": NSNull()
+        ]
+        layer?.addSublayer(heartLayer)
+        updateFonts()
+        applyState(state: nil, connected: false)
     }
 
     required init?(coder: NSCoder) {
@@ -352,6 +177,7 @@ private final class FloatView: NSView {
             frame.size = newSize
             window.setFrame(frame, display: true)
             needsLayout = true
+            needsDisplay = true
             onInteractiveScaleChanged?(clamped)
         } else if let startOrigin = dragStartOrigin {
             window.setFrameOrigin(NSPoint(
@@ -380,32 +206,6 @@ private final class FloatView: NSView {
         return NSRect(x: bounds.maxX - side, y: 0, width: side, height: side)
     }
 
-    private func setup() {
-        pill.wantsLayer = true
-        pill.layer?.backgroundColor = NSColor(srgbRed: 0.055, green: 0.055, blue: 0.05, alpha: 0.62).cgColor
-        pill.layer?.cornerRadius = 22
-        pill.layer?.cornerCurve = .continuous
-        pill.layer?.borderWidth = 1
-        pill.layer?.borderColor = NSColor.white.withAlphaComponent(0.13).cgColor
-        pill.layer?.masksToBounds = true
-        pill.autoresizingMask = [.width, .height]
-        addSubview(pill)
-
-        for label in [bpmLabel, unitLabel, statusLabel] {
-            addSubview(label)
-        }
-        addSubview(heart)
-        statusDot.wantsLayer = true
-        addSubview(statusDot)
-        statusDot.layer?.backgroundColor = mutedColor.cgColor
-
-        gripView.isHidden = !showResizeGrip
-        addSubview(gripView)
-
-        updateFonts()
-        update(state: nil, connected: false)
-    }
-
     var preferredSize: NSSize {
         let s = scale
         let padX = 18 * s
@@ -413,70 +213,66 @@ private final class FloatView: NSView {
         let heartW = 30 * s
         let gap = 12 * s
         let bpmWidth = measure("000", font: bpmFont).width + labelPadding
-        let unitWidth = measure("BPM", font: unitFont, kern: 1.8 * s).width + labelPadding
-        let textWidth = bpmWidth + 6 * s + unitWidth
         let statusWidth = measure("信号中断 · 00 分钟前", font: statusFont).width
         let mainHeight = max(27 * s, measure("0", font: bpmFont).height)
-        let width = padX + heartW + gap + max(textWidth, statusWidth + 12 * s) + padX
+        let width = padX + heartW + gap + max(bpmWidth, statusWidth + 12 * s) + padX
         let height = padY + mainHeight + 5 * s + measure("0", font: statusFont).height + padY
         return NSSize(width: ceil(width), height: ceil(height))
     }
 
     func update(state: HeartRateState?, connected: Bool) {
+        applyState(state: state, connected: connected)
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    private func applyState(state: HeartRateState?, connected: Bool) {
         let bpm = state?.bpm
         let status = state?.status ?? ""
         let age = state?.lastValidAgeMs
+        bpmValue = bpm
 
         let permissionIssue = connected
             && (state?.lastError?.contains("未授权") == true || state?.lastError?.contains("蓝牙不可用") == true)
 
         if permissionIssue {
-            bpmText = bpm.map(String.init) ?? "--"
+            bpmText = bpm.map(String.init) ?? ""
             statusText = "需要蓝牙权限"
             statusColor = seriousColor
-            statusDot.layer?.backgroundColor = seriousColor.cgColor
-            setContentAlpha(0.85)
+            contentAlpha = 0.85
         } else if !connected {
-            bpmText = bpm.map(String.init) ?? "--"
+            bpmText = bpm.map(String.init) ?? ""
             statusText = "后端未运行"
             statusColor = mutedColor
-            statusDot.layer?.backgroundColor = mutedColor.cgColor
-            setContentAlpha(0.7)
-        } else if let bpm {
-            bpmText = String(bpm)
+            contentAlpha = 0.7
+        } else if bpm != nil {
+            bpmText = String(bpm!)
             switch status {
             case "live":
                 statusText = "实时"
                 statusColor = positiveColor
-                statusDot.layer?.backgroundColor = positiveColor.cgColor
-                setContentAlpha(1)
+                contentAlpha = 1
             case "holding":
                 statusText = "保持中 · \(ageText(age))"
                 statusColor = warnColor
-                statusDot.layer?.backgroundColor = warnColor.cgColor
-                setContentAlpha(1)
+                contentAlpha = 1
             case "stale":
                 statusText = "信号中断 · \(ageText(age))"
                 statusColor = seriousColor
-                statusDot.layer?.backgroundColor = seriousColor.cgColor
-                setContentAlpha(0.6)
+                contentAlpha = 0.6
             default:
                 statusText = state?.statusLabel ?? "等待心率"
                 statusColor = mutedColor
-                statusDot.layer?.backgroundColor = mutedColor.cgColor
-                setContentAlpha(0.7)
+                contentAlpha = 0.7
             }
         } else {
-            bpmText = "--"
+            bpmText = ""
             statusText = state?.statusLabel ?? "正在连接"
             statusColor = mutedColor
-            statusDot.layer?.backgroundColor = mutedColor.cgColor
-            setContentAlpha(0.7)
+            contentAlpha = 0.7
         }
 
-        applyText()
-        heart.update(bpm: connected ? bpm : nil)
-        needsLayout = true
+        updateHeartAnimation()
     }
 
     override func layout() {
@@ -484,86 +280,126 @@ private final class FloatView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        pill.frame = bounds
 
         let s = scale
         let padX = 18 * s
         let padY = 12 * s
         let heartW = 30 * s
         let heartH = 27 * s
-        let gap = 12 * s
-        let bpmWidth = measure("000", font: bpmFont).width + labelPadding
         let bpmHeight = measure("0", font: bpmFont).height
-        let unitMeasured = measure("BPM", font: unitFont, kern: 1.8 * s)
-        let unitSize = NSSize(width: unitMeasured.width + labelPadding, height: unitMeasured.height)
         let statusHeight = measure("0", font: statusFont).height
         let mainHeight = max(heartH, bpmHeight)
+        let bpmY = padY + statusHeight + 5 * s
+
+        heartLayer.bounds = CGRect(origin: .zero, size: CGSize(width: heartW, height: heartH))
+        heartLayer.position = CGPoint(
+            x: padX + heartW / 2,
+            y: bpmY + mainHeight / 2
+        )
+        heartLayer.contentsScale = window?.backingScaleFactor ?? 2
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // 先整体清空再重画：任何一次更新都不会留下上一帧的笔画。
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.compositingOperation = .copy
+        NSColor.clear.setFill()
+        dirtyRect.fill()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let s = scale
+        if !transparentBackground {
+            let pill = NSBezierPath(
+                roundedRect: bounds,
+                xRadius: 22 * s,
+                yRadius: 22 * s
+            )
+            NSColor(srgbRed: 0.055, green: 0.055, blue: 0.05, alpha: 0.62).setFill()
+            pill.fill()
+            pill.lineWidth = 1
+            NSColor.white.withAlphaComponent(0.13).setStroke()
+            pill.stroke()
+        }
+
+        let padX = 18 * s
+        let padY = 12 * s
+        let heartW = 30 * s
+        let gap = 12 * s
+        let statusHeight = measure("0", font: statusFont).height
         let bpmX = padX + heartW + gap
         let bpmY = padY + statusHeight + 5 * s
 
-        heart.frame = NSRect(
-            x: padX,
-            y: bpmY + (mainHeight - heartH) / 2,
-            width: heartW,
-            height: heartH
-        )
-        bpmLabel.frame = NSRect(x: bpmX, y: bpmY, width: bpmWidth, height: bpmHeight)
-        unitLabel.frame = NSRect(
-            x: bpmLabel.frame.maxX + 6 * s,
-            y: bpmY - bpmFont.descender + unitFont.descender,
-            width: unitSize.width,
-            height: unitSize.height
-        )
+        if !bpmText.isEmpty {
+            styled(bpmText, font: bpmFont, color: .white).draw(at: NSPoint(x: bpmX, y: bpmY))
+        }
 
         let dotSize = 6 * s
-        statusDot.frame = NSRect(
+        let dotRect = NSRect(
             x: bpmX,
             y: padY + (statusHeight - dotSize) / 2,
             width: dotSize,
             height: dotSize
         )
-        statusDot.layer?.cornerRadius = dotSize / 2
-        statusLabel.frame = NSRect(
-            x: statusDot.frame.maxX + 5 * s,
-            y: padY,
-            width: max(0, bounds.width - (statusDot.frame.maxX + 5 * s) - padX),
-            height: statusHeight
+        (statusColor.withAlphaComponent(contentAlpha)).setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+        styled(statusText, font: statusFont, color: statusColor).draw(
+            at: NSPoint(x: dotRect.maxX + 5 * s, y: padY)
         )
 
-        let gripSide = 12 * s
-        gripView.frame = NSRect(
-            x: bounds.maxX - gripSide - 14 * s,
-            y: 12 * s,
-            width: gripSide,
-            height: gripSide
-        )
+        if showResizeGrip {
+            let side = 12 * s
+            let origin = NSPoint(
+                x: bounds.maxX - side - 14 * s,
+                y: 12 * s
+            )
+            let path = NSBezierPath()
+            path.lineWidth = max(1, side / 10)
+            path.lineCapStyle = .round
+            NSColor.white.withAlphaComponent(0.72).setStroke()
+            path.move(to: NSPoint(x: origin.x, y: origin.y))
+            path.line(to: NSPoint(x: origin.x + side, y: origin.y + side))
+            path.move(to: NSPoint(x: origin.x + side * 0.38, y: origin.y))
+            path.line(to: NSPoint(x: origin.x + side, y: origin.y + side * 0.62))
+            path.move(to: NSPoint(x: origin.x + side * 0.74, y: origin.y))
+            path.line(to: NSPoint(x: origin.x + side, y: origin.y + side * 0.26))
+            path.stroke()
+        }
     }
 
     private func updateFonts() {
         bpmFont = NSFont.monospacedDigitSystemFont(ofSize: 64 * scale, weight: .semibold)
-        unitFont = NSFont.systemFont(ofSize: 10 * scale, weight: .medium)
         statusFont = NSFont.systemFont(ofSize: 11 * scale, weight: .regular)
-        pill.layer?.cornerRadius = 22 * scale
-        applyText()
     }
 
-    private func applyText() {
-        bpmLabel.text = styled(bpmText, font: bpmFont, color: .white)
-        unitLabel.text = styled(
-            "BPM",
-            font: unitFont,
-            color: NSColor.white.withAlphaComponent(0.62),
-            kern: 1.8 * scale
-        )
-        statusLabel.text = styled(statusText, font: statusFont, color: statusColor)
+    private func updateHeartAnimation() {
+        heartLayer.removeAnimation(forKey: "beat")
+        heartLayer.opacity = Float(contentAlpha)
+        let duration = bpmValue.map { max(0.38, min(1.4, 60.0 / Double($0))) } ?? 1.15
+        let animation = CAKeyframeAnimation(keyPath: "transform.scale")
+        animation.values = [1.0, 1.13, 1.0, 1.06, 1.0, 1.0]
+        animation.keyTimes = [0, 0.12, 0.24, 0.36, 0.48, 1]
+        animation.duration = duration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        heartLayer.add(animation, forKey: "beat")
     }
 
-    private func setContentAlpha(_ value: CGFloat) {
-        heart.alphaValue = value
-        bpmLabel.alphaValue = value
-        unitLabel.alphaValue = value
-        statusDot.alphaValue = value
-        statusLabel.alphaValue = value
+    private func makeHeartImage() -> CGImage? {
+        guard let symbol = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: nil) else {
+            return nil
+        }
+        let size = NSSize(width: 128, height: 128)
+        let image = NSImage(size: size, flipped: false) { rect in
+            symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.compositingOperation = .sourceAtop
+            accentColor.setFill()
+            NSBezierPath(rect: rect).fill()
+            NSGraphicsContext.restoreGraphicsState()
+            return true
+        }
+        return image.cgImage(forProposedRect: nil, context: nil, hints: nil)
     }
 
     private func ageText(_ milliseconds: Int?) -> String {
@@ -582,12 +418,13 @@ private final class FloatView: NSView {
         kern: CGFloat = 0
     ) -> NSAttributedString {
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.55)
-        shadow.shadowBlurRadius = 3
-        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.55 * contentAlpha)
+        // 投影跟随缩放，避免小尺寸下模糊相对字形过大而渗进数字内圈。
+        shadow.shadowBlurRadius = max(0.5, 3 * scale)
+        shadow.shadowOffset = NSSize(width: 0, height: max(0.3, -1 * scale))
         var attributes: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: color,
+            .foregroundColor: color.withAlphaComponent(contentAlpha),
             .shadow: shadow
         ]
         if kern != 0 { attributes[.kern] = kern }

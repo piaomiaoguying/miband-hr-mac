@@ -7,10 +7,15 @@ PIDFILE="data/app.pid"
 PID=""
 
 if [[ -f "$PIDFILE" ]]; then
-  PID=$(cat "$PIDFILE")
+  PID=$(cat "$PIDFILE" 2>/dev/null)
 fi
 
+# PID 文件可能过期：优先校验进程真实存在，失效时按监听端口兜底查找。
 if [[ -z "$PID" ]] || ! kill -0 "$PID" 2>/dev/null; then
+  PID=$(lsof -tiTCP:3030 -sTCP:LISTEN 2>/dev/null | head -n 1)
+fi
+
+if [[ -z "$PID" ]]; then
   echo "状态：未运行"
   if pgrep -f "MibandFloat.app/Contents/MacOS/MibandFloat" >/dev/null 2>&1; then
     echo "浮窗：运行中（后台服务未运行）"
