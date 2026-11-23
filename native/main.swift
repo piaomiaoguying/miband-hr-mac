@@ -247,6 +247,12 @@ private final class FloatView: NSView {
             var origin = window.frame.origin
             origin.x += delta.x
             origin.y += delta.y
+            // 限制在所在屏幕的可见范围内，避免拖到看不见的地方。
+            if let visible = (window.screen ?? NSScreen.main)?.visibleFrame {
+                let size = window.frame.size
+                origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - size.width))
+                origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - size.height))
+            }
             window.setFrameOrigin(origin)
         }
     }
@@ -780,25 +786,27 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         if let saved = defaults.string(forKey: "float.frame") {
             let rect = NSRectFromString(saved)
             if rect.width > 40, rect.height > 30 {
-                // 优先恢复到保存时所在的屏幕，保持右上角相对位置。
-                let screen = NSScreen.screens.first { $0.frame.intersects(rect) }
-                if let screen {
-                    let visible = screen.visibleFrame
-                    let x = min(max(rect.origin.x, visible.minX), visible.maxX - size.width)
-                    let top = min(max(rect.maxY, visible.minY + size.height), visible.maxY)
-                    return NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
+                // 优先恢复到保存时所在的屏幕。
+                if let screen = NSScreen.screens.first(where: { $0.frame.intersects(rect) }) {
+                    return clamped(rect: rect, to: screen.visibleFrame, size: size)
                 }
+                // 保存位置不在任何屏幕上（例如显示器变化或曾被拖出边界）：
+                // 落到主屏并钳制到可见区域，避免窗口停在看不见的地方。
                 if let fallback = NSScreen.main?.visibleFrame {
-                    return NSRect(
-                        x: min(rect.origin.x, fallback.maxX - size.width),
-                        y: min(rect.origin.y, fallback.maxY - size.height),
-                        width: size.width,
-                        height: size.height
-                    )
+                    return clamped(rect: rect, to: fallback, size: size)
                 }
             }
         }
         return defaultFrame(size: size)
+    }
+
+    /// 保证窗口完整落在可见区域内。
+    private func clamped(rect: NSRect, to visible: NSRect, size: NSSize) -> NSRect {
+        let maxX = max(visible.minX, visible.maxX - size.width)
+        let maxY = max(visible.minY, visible.maxY - size.height)
+        let x = min(max(rect.origin.x, visible.minX), maxX)
+        let y = min(max(rect.origin.y, visible.minY), maxY)
+        return NSRect(x: x, y: y, width: size.width, height: size.height)
     }
 
     private func defaultFrame(size: NSSize) -> NSRect {
