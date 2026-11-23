@@ -210,10 +210,11 @@ private final class FloatView: NSView {
             resizeStartWidth = window.frame.width
             resizeStartHeight = window.frame.height
             resizeStartOrigin = window.frame.origin
-        } else {
-            resizing = false
-            dragStartOrigin = window.frame.origin
+            return
         }
+
+        resizing = false
+        dragStartOrigin = window.frame.origin
     }
 
     override func mouseDragged(with event: NSEvent) {
