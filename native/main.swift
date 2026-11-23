@@ -129,6 +129,97 @@ private final class HeartView: NSView {
     }
 }
 
+// MARK: - 文字
+
+private final class LabelView: NSView {
+    var text: NSAttributedString? {
+        didSet { redraw() }
+    }
+
+    private let textLayer = CALayer()
+    private var lastPixelSize = CGSize.zero
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        textLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "contentsScale": NSNull()
+        ]
+        textLayer.magnificationFilter = .linear
+        textLayer.minificationFilter = .linear
+        layer?.addSublayer(textLayer)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textLayer.frame = bounds
+        CATransaction.commit()
+        redrawIfNeeded()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+        redrawIfNeeded()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        lastPixelSize = .zero
+        redraw()
+    }
+
+    private func redrawIfNeeded() {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixel = CGSize(width: ceil(bounds.width * scale), height: ceil(bounds.height * scale))
+        guard pixel != lastPixelSize else { return }
+        redraw()
+    }
+
+    // 每次更新都重新生成整张位图并整体替换 layer 内容，旧字形没有残留通道。
+    private func redraw() {
+        guard bounds.width > 0.5, bounds.height > 0.5 else { return }
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixelWidth = max(1, Int(ceil(bounds.width * scale)))
+        let pixelHeight = max(1, Int(ceil(bounds.height * scale)))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return }
+        rep.size = bounds.size
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        text?.draw(at: .zero)
+        NSGraphicsContext.restoreGraphicsState()
+
+        lastPixelSize = CGSize(width: pixelWidth, height: pixelHeight)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        textLayer.contentsScale = scale
+        textLayer.contents = rep.cgImage
+        CATransaction.commit()
+    }
+}
+
 // MARK: - 缩放手柄
 
 private final class GripView: NSView {
@@ -182,9 +273,9 @@ private final class FloatView: NSView {
     private let pill = NSView()
     private let gripView = GripView()
     private let heart = HeartView()
-    private let bpmLabel = NSTextField(labelWithString: "--")
-    private let unitLabel = NSTextField(labelWithString: "BPM")
-    private let statusLabel = NSTextField(labelWithString: "等待手环")
+    private let bpmLabel = LabelView()
+    private let unitLabel = LabelView()
+    private let statusLabel = LabelView()
     private let statusDot = NSView()
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
@@ -301,11 +392,6 @@ private final class FloatView: NSView {
         addSubview(pill)
 
         for label in [bpmLabel, unitLabel, statusLabel] {
-            label.isEditable = false
-            label.isSelectable = false
-            label.isBordered = false
-            label.drawsBackground = false
-            label.lineBreakMode = .byClipping
             addSubview(label)
         }
         addSubview(heart)
@@ -462,14 +548,14 @@ private final class FloatView: NSView {
     }
 
     private func applyText() {
-        bpmLabel.attributedStringValue = styled(bpmText, font: bpmFont, color: .white)
-        unitLabel.attributedStringValue = styled(
+        bpmLabel.text = styled(bpmText, font: bpmFont, color: .white)
+        unitLabel.text = styled(
             "BPM",
             font: unitFont,
             color: NSColor.white.withAlphaComponent(0.62),
             kern: 1.8 * scale
         )
-        statusLabel.attributedStringValue = styled(statusText, font: statusFont, color: statusColor)
+        statusLabel.text = styled(statusText, font: statusFont, color: statusColor)
     }
 
     private func setContentAlpha(_ value: CGFloat) {
@@ -655,9 +741,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private func restoredFrame(size: NSSize) -> NSRect {
         if let saved = defaults.string(forKey: "float.frame") {
             let rect = NSRectFromString(saved)
-            let visible = NSScreen.screens.contains { $0.visibleFrame.intersects(rect) }
-            if rect.width > 40, rect.height > 30, visible {
-                return NSRect(x: rect.origin.x, y: rect.origin.y, width: size.width, height: size.height)
+            if rect.width > 40, rect.height > 30 {
+                // 优先恢复到保存时所在的屏幕，保持右上角相对位置。
+                let screen = NSScreen.screens.first { $0.frame.intersects(rect) }
+                if let screen {
+                    let visible = screen.visibleFrame
+                    let x = min(max(rect.origin.x, visible.minX), visible.maxX - size.width)
+                    let top = min(max(rect.maxY, visible.minY + size.height), visible.maxY)
+                    return NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
+                }
+                if let fallback = NSScreen.main?.visibleFrame {
+                    return NSRect(
+                        x: min(rect.origin.x, fallback.maxX - size.width),
+                        y: min(rect.origin.y, fallback.maxY - size.height),
+                        width: size.width,
+                        height: size.height
+                    )
+                }
             }
         }
         return defaultFrame(size: size)
