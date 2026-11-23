@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import Darwin
 import Foundation
 import QuartzCore
@@ -82,6 +83,15 @@ private final class FloatView: NSView {
         }
     }
 
+    /// 锁定时窗口整体忽略鼠标事件，实现真正的点击穿透。
+    /// 解锁依赖全局热键 ⌘⇧L（Carbon，无需辅助功能权限），因此不会锁死。
+    var isLocked = false {
+        didSet {
+            showResizeGrip = !isLocked
+            window?.invalidateCursorRects(for: self)
+        }
+    }
+
     var makeMenu: (() -> NSMenu)?
     var onPositionChanged: (() -> Void)?
     var onInteractiveScaleChanged: ((CGFloat) -> Void)?
@@ -156,6 +166,16 @@ private final class FloatView: NSView {
         self
     }
 
+    /// 锁定后左键穿透到下层应用，但右键仍需命中本视图，否则没有任何入口可以解锁。
+    override func rightMouseDown(with event: NSEvent) {
+        guard let menu = makeMenu?() else { return }
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    private func currentEventIsRightClick() -> Bool {
+        NSApp.currentEvent?.type == .rightMouseDown
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
     }
@@ -165,7 +185,7 @@ private final class FloatView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let window else { return }
+        guard !isLocked, let window else { return }
         let point = convert(event.locationInWindow, from: nil)
         dragStartMouse = NSEvent.mouseLocation
         if showResizeGrip && gripHitRect.contains(point) {
@@ -504,6 +524,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var backendLogHandle: FileHandle?
     private var signalSource: DispatchSourceSignal?
     private var moveObserver: NSObjectProtocol?
+    private var unlockHotKeyRef: EventHotKeyRef?
 
     private let defaults = UserDefaults.standard
     private var port = 3030
@@ -519,6 +540,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         buildWindow()
         observeTermination()
         observeWindowMoves()
+        registerUnlockHotKey()
         startPolling()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.backendReachable else { return }
@@ -534,6 +556,69 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         source.resume()
         signalSource = source
+    }
+
+    // 加锁后窗口忽略所有鼠标事件，必须有一条不依赖点击的退路。
+    // 使用 Carbon RegisterEventHotKey：系统级生效，且不需要「辅助功能」授权。
+    private func registerUnlockHotKey() {
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let selfPointer = Unmanaged.passUnretained(self).toOpaque()
+
+        let handler: EventHandlerUPP = { _, event, userData in
+            guard let userData, let event else { return noErr }
+            var hotKeyID = EventHotKeyID()
+            GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &hotKeyID
+            )
+            guard hotKeyID.signature == OSType(0x4D424C54) else { return noErr }
+            let delegate = Unmanaged<AppDelegate>
+                .fromOpaque(userData)
+                .takeUnretainedValue()
+            DispatchQueue.main.async {
+                delegate.unlockFromHotKey()
+            }
+            return noErr
+        }
+
+        InstallEventHandler(
+            GetApplicationEventTarget(),
+            handler,
+            1,
+            &eventType,
+            selfPointer,
+            nil
+        )
+
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4D424C54), id: 1)
+        var ref: EventHotKeyRef?
+        RegisterEventHotKey(
+            UInt32(kVK_ANSI_L),
+            UInt32(cmdKey | shiftKey),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        unlockHotKeyRef = ref
+    }
+
+    fileprivate func unlockFromHotKey() {
+        guard locked else { return }
+        locked = false
+        saveSettings()
+        floatView.isLocked = false
+        window.ignoresMouseEvents = false
+        updateVisibility()
+        NSSound.beep()
     }
 
     private func observeWindowMoves() {
@@ -613,7 +698,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         floatView.onInteractiveScaleChanged = { [weak self] value in
             self?.scale = value
         }
-        floatView.showResizeGrip = !locked
+        floatView.isLocked = locked
 
         let size = floatView.preferredSize
         let frame = restoredFrame(size: size)
@@ -621,8 +706,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = floatView
         window.setContentSize(size)
         window.setFrame(frame, display: false)
-        window.ignoresMouseEvents = locked
         window.hasShadow = !transparentBackground
+        window.ignoresMouseEvents = locked
         floatView.needsLayout = true
         updateVisibility()
         window.orderFrontRegardless()
@@ -687,8 +772,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             if !window.isVisible {
                 window.orderFrontRegardless()
             }
-            window.ignoresMouseEvents = locked
-        } else if window.isVisible {
+            } else if window.isVisible {
             window.orderOut(nil)
         }
     }
@@ -868,7 +952,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleLocked() {
         locked.toggle()
         saveSettings()
-        floatView.showResizeGrip = !locked
+        floatView.isLocked = locked
         window.ignoresMouseEvents = locked
         updateVisibility()
     }
@@ -1033,7 +1117,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
 
         addToggle(to: menu, title: "显示浮窗", action: #selector(toggleVisible), on: userVisible)
-        addToggle(to: menu, title: "锁定位置（点击穿透）", action: #selector(toggleLocked), on: locked)
+        addToggle(to: menu, title: "锁定位置（点击穿透，⌘⇧L 解锁）", action: #selector(toggleLocked), on: locked)
         addToggle(to: menu, title: "纯透明背景", action: #selector(toggleTransparent), on: transparentBackground)
         addToggle(to: menu, title: "开机自动启动", action: #selector(toggleLaunchAtLogin), on: launchAtLoginEnabled)
         menu.addItem(.separator())
