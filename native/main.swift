@@ -880,6 +880,91 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         saveSettings()
     }
 
+    // MARK: - 开机自启动
+
+    private var launchAgentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+            .appendingPathComponent("local.miband.float.plist")
+    }
+
+    private var launchAtLoginEnabled: Bool {
+        FileManager.default.fileExists(atPath: launchAgentURL.path)
+    }
+
+    @objc private func toggleLaunchAtLogin() {
+        if launchAtLoginEnabled {
+            disableLaunchAtLogin()
+        } else {
+            enableLaunchAtLogin()
+        }
+    }
+
+    private func enableLaunchAtLogin() {
+        let executable = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/MibandFloat")
+            .path
+        let plist: [String: Any] = [
+            "Label": "local.miband.float",
+            "ProgramArguments": [executable],
+            "RunAtLoad": true,
+            "ProcessType": "Interactive",
+            "LimitLoadToSessionType": "Aqua"
+        ]
+        do {
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: plist,
+                format: .xml,
+                options: 0
+            )
+            try FileManager.default.createDirectory(
+                at: launchAgentURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: launchAgentURL, options: .atomic)
+            // 立即注册到 launchd，下次登录无需等重新扫描 LaunchAgents。
+            runLaunchctl(["bootstrap", "gui/\(getuid())", launchAgentURL.path])
+        } catch {
+            presentAlert("无法开启开机自启动：\(error.localizedDescription)")
+        }
+    }
+
+    private func disableLaunchAtLogin() {
+        // 先从 launchd 卸载，避免已注册的任务继续生效。
+        runLaunchctl(["bootout", "gui/\(getuid())/local.miband.float"])
+        do {
+            try FileManager.default.removeItem(at: launchAgentURL)
+        } catch CocoaError.fileNoSuchFile {
+            // 已经不存在，视为已关闭
+        } catch {
+            presentAlert("无法关闭开机自启动：\(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    private func runLaunchctl(_ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        } catch {
+            return -1
+        }
+    }
+
+    private func presentAlert(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "心率浮窗"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
+    }
+
     @objc private func setScale(_ sender: NSMenuItem) {
         guard let value = (sender.representedObject as? NSNumber)?.doubleValue else { return }
         scale = CGFloat(value)
@@ -950,6 +1035,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         addToggle(to: menu, title: "显示浮窗", action: #selector(toggleVisible), on: userVisible)
         addToggle(to: menu, title: "锁定位置（点击穿透）", action: #selector(toggleLocked), on: locked)
         addToggle(to: menu, title: "纯透明背景", action: #selector(toggleTransparent), on: transparentBackground)
+        addToggle(to: menu, title: "开机自动启动", action: #selector(toggleLaunchAtLogin), on: launchAtLoginEnabled)
         menu.addItem(.separator())
 
         let sizeItem = NSMenuItem(title: "大小", action: nil, keyEquivalent: "")
