@@ -113,6 +113,7 @@ private final class FloatView: NSView {
     private let heartLayer = CALayer()
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
+    private var lastDragPoint: NSPoint = .zero
     private var resizing = false
     private var resizeStartScale: CGFloat = 1
     private var resizeStartWidth: CGFloat = 0
@@ -201,6 +202,7 @@ private final class FloatView: NSView {
         guard !isLocked, let window else { return }
         let point = convert(event.locationInWindow, from: nil)
         dragStartMouse = NSEvent.mouseLocation
+        lastDragPoint = NSEvent.mouseLocation
         if showResizeGrip && gripVisible && gripHitRect.contains(point) {
             resizing = true
             dragStartOrigin = nil
@@ -215,9 +217,10 @@ private final class FloatView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let window, let startMouse = dragStartMouse else { return }
+        guard let window else { return }
         let current = NSEvent.mouseLocation
         if resizing {
+            guard let startMouse = dragStartMouse else { return }
             guard resizeStartWidth > 0 else { return }
             let delta = current.x - startMouse.x
             let target = resizeStartScale * (resizeStartWidth + delta) / resizeStartWidth
@@ -233,12 +236,18 @@ private final class FloatView: NSView {
             needsLayout = true
             renderContent()
             onInteractiveScaleChanged?(clamped)
-        } else if let startOrigin = dragStartOrigin {
-            // setFrameOrigin 只改位置、不重绘内容，拖动时最轻量。
-            window.setFrameOrigin(NSPoint(
-                x: startOrigin.x + current.x - startMouse.x,
-                y: startOrigin.y + current.y - startMouse.y
-            ))
+        } else if dragStartOrigin != nil {
+            // 用事件自带的增量累加，而不是「起始点 + 当前点」。
+            // 快速拖动时事件可能被合并或丢弃，绝对差值会累积成漂移；
+            // 增量只依赖相邻两帧的相对位移，不会积累误差。
+            let delta = event.deltaX == 0 && event.deltaY == 0
+                ? NSPoint(x: current.x - lastDragPoint.x, y: current.y - lastDragPoint.y)
+                : NSPoint(x: event.deltaX, y: -event.deltaY)
+            lastDragPoint = current
+            var origin = window.frame.origin
+            origin.x += delta.x
+            origin.y += delta.y
+            window.setFrameOrigin(origin)
         }
     }
 
