@@ -66,8 +66,14 @@ private final class FloatView: NSView {
     }
 
     var transparentBackground = false {
-        didSet { renderContent() }
+        didSet {
+            renderContent()
+            onTransparentChanged?(transparentBackground)
+        }
     }
+
+    /// 纯透明模式下窗口不应再有系统投影，否则会在四周留一圈黑色描边。
+    var onTransparentChanged: ((Bool) -> Void)?
 
     var showResizeGrip = true {
         didSet {
@@ -596,6 +602,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         floatView = FloatView(frame: NSRect(origin: .zero, size: NSSize(width: 240, height: 96)))
         floatView.scale = scale
         floatView.transparentBackground = transparentBackground
+        floatView.onTransparentChanged = { [weak self] transparent in
+            self?.window?.hasShadow = !transparent
+        }
         floatView.makeMenu = { [weak self] in self?.makeMenu() ?? NSMenu() }
         floatView.onPositionChanged = { [weak self] in
             self?.saveSettings()
@@ -613,6 +622,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(size)
         window.setFrame(frame, display: false)
         window.ignoresMouseEvents = locked
+        window.hasShadow = !transparentBackground
         floatView.needsLayout = true
         updateVisibility()
         window.orderFrontRegardless()
@@ -866,6 +876,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleTransparent() {
         transparentBackground.toggle()
         floatView.transparentBackground = transparentBackground
+        window.hasShadow = !transparentBackground
         saveSettings()
     }
 
