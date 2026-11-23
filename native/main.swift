@@ -80,6 +80,7 @@ private final class FloatView: NSView {
     var onPositionChanged: (() -> Void)?
     var onInteractiveScaleChanged: ((CGFloat) -> Void)?
 
+    private let contentLayer = CALayer()
     private let heartLayer = CALayer()
     private var dragStartMouse: NSPoint?
     private var dragStartOrigin: NSPoint?
@@ -102,9 +103,9 @@ private final class FloatView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
+        // 视图自身图层交给 AppKit 管理，位图放在独立子图层，避免被重绘覆盖或残留。
+        layerContentsRedrawPolicy = .never
         layer?.contentsGravity = .resize
-        layer?.magnificationFilter = .linear
-        layer?.minificationFilter = .linear
         // 禁止本视图图层的隐式动画，避免尺寸变化时旧内容被拉伸残留。
         layer?.actions = [
             "bounds": NSNull(),
@@ -113,6 +114,17 @@ private final class FloatView: NSView {
             "sublayers": NSNull(),
             "frame": NSNull()
         ]
+        contentLayer.actions = [
+            "contents": NSNull(),
+            "bounds": NSNull(),
+            "position": NSNull(),
+            "contentsScale": NSNull()
+        ]
+        contentLayer.contentsGravity = .resize
+        contentLayer.magnificationFilter = .linear
+        contentLayer.minificationFilter = .linear
+        layer?.addSublayer(contentLayer)
+
         heartLayer.contentsGravity = .resizeAspect
         heartLayer.contents = makeHeartImage()
         heartLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
@@ -336,8 +348,9 @@ private final class FloatView: NSView {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer?.contentsScale = backingScale
-        layer?.contents = rep.cgImage
+        contentLayer.frame = CGRect(origin: .zero, size: size)
+        contentLayer.contentsScale = backingScale
+        contentLayer.contents = rep.cgImage
         CATransaction.commit()
     }
 
@@ -349,7 +362,7 @@ private final class FloatView: NSView {
                 xRadius: 22 * s,
                 yRadius: 22 * s
             )
-            NSColor(srgbRed: 0.055, green: 0.055, blue: 0.05, alpha: 0.62).setFill()
+            NSColor(srgbRed: 0.36, green: 0.36, blue: 0.36, alpha: 1.0).setFill()
             pill.fill()
             pill.lineWidth = 1
             NSColor.white.withAlphaComponent(0.13).setStroke()
@@ -474,11 +487,9 @@ private final class FloatView: NSView {
 
 // MARK: - App
 
-private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: FloatWindow!
     private var floatView: FloatView!
-    private var statusItem: NSStatusItem!
-    private var settingsMenu: NSMenu!
     private var pollTimer: Timer?
     private var isPolling = false
     private var lastState: HeartRateState?
@@ -486,6 +497,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
     private var backendProcess: Process?
     private var backendLogHandle: FileHandle?
     private var signalSource: DispatchSourceSignal?
+    private var moveObserver: NSObjectProtocol?
 
     private let defaults = UserDefaults.standard
     private var port = 3030
@@ -498,9 +510,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         NSApp.setActivationPolicy(.accessory)
         parseArguments()
         loadSettings()
-        buildStatusItem()
         buildWindow()
         observeTermination()
+        observeWindowMoves()
         startPolling()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.backendReachable else { return }
@@ -516,6 +528,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         }
         source.resume()
         signalSource = source
+    }
+
+    private func observeWindowMoves() {
+        moveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            self?.saveWindowFrame()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -568,19 +590,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         defaults.set(locked, forKey: "float.locked")
         defaults.set(Double(scale), forKey: "float.scale")
         defaults.set(transparentBackground, forKey: "float.transparent")
-    }
-
-    private func buildStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "heart.fill", accessibilityDescription: "心率浮窗")
-            image?.isTemplate = true
-            button.image = image
-            button.toolTip = "心率浮窗"
-        }
-        settingsMenu = makeMenu()
-        settingsMenu.delegate = self
-        statusItem.menu = settingsMenu
     }
 
     private func buildWindow() {
@@ -671,14 +680,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
             window.ignoresMouseEvents = locked
         } else if window.isVisible {
             window.orderOut(nil)
-        }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let fresh = makeMenu()
-        menu.removeAllItems()
-        for item in fresh.items {
-            menu.addItem(item)
         }
     }
 
@@ -845,7 +846,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate
         updateVisibility()
         let bpm = lastState?.bpm
         let label = lastState?.statusLabel ?? (connected ? "等待数据" : "后端未运行")
-        statusItem.button?.toolTip = bpm.map { "心率 \($0) BPM · \(label)" } ?? "心率浮窗 · \(label)"
+        window?.title = bpm.map { "心率 \($0) BPM · \(label)" } ?? "心率浮窗 · \(label)"
     }
 
     @objc private func toggleVisible() {
