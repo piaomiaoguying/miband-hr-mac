@@ -60,18 +60,18 @@ private final class FloatView: NSView {
             guard scale != oldValue else { return }
             updateFonts()
             needsLayout = true
-            needsDisplay = true
+            renderContent()
             window?.invalidateCursorRects(for: self)
         }
     }
 
     var transparentBackground = false {
-        didSet { needsDisplay = true }
+        didSet { renderContent() }
     }
 
     var showResizeGrip = true {
         didSet {
-            needsDisplay = true
+            renderContent()
             window?.invalidateCursorRects(for: self)
         }
     }
@@ -102,6 +102,9 @@ private final class FloatView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor.clear.cgColor
+        layer?.contentsGravity = .resize
+        layer?.magnificationFilter = .linear
+        layer?.minificationFilter = .linear
         // 禁止本视图图层的隐式动画，避免尺寸变化时旧内容被拉伸残留。
         layer?.actions = [
             "bounds": NSNull(),
@@ -177,7 +180,7 @@ private final class FloatView: NSView {
             frame.size = newSize
             window.setFrame(frame, display: true)
             needsLayout = true
-            needsDisplay = true
+            renderContent()
             onInteractiveScaleChanged?(clamped)
         } else if let startOrigin = dragStartOrigin {
             window.setFrameOrigin(NSPoint(
@@ -223,7 +226,7 @@ private final class FloatView: NSView {
     func update(state: HeartRateState?, connected: Bool) {
         applyState(state: state, connected: connected)
         needsLayout = true
-        needsDisplay = true
+        renderContent()
     }
 
     private func applyState(state: HeartRateState?, connected: Bool) {
@@ -297,21 +300,52 @@ private final class FloatView: NSView {
             y: bpmY + mainHeight / 2
         )
         heartLayer.contentsScale = window?.backingScaleFactor ?? 2
-        needsDisplay = true
+        renderContent()
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        // 先整体清空再重画：任何一次更新都不会留下上一帧的笔画。
+    // 每次更新都在离屏位图上重画整个浮窗，再整块替换图层内容。
+    // 不依赖 AppKit 的局部重绘，旧内容没有任何留存通道。
+    private func renderContent() {
+        let size = bounds.size
+        guard size.width > 1, size.height > 1 else { return }
+        let backingScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        let pixelWidth = max(1, Int(ceil(size.width * backingScale)))
+        let pixelHeight = max(1, Int(ceil(size.height * backingScale)))
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return }
+        rep.size = size
+        guard let graphics = NSGraphicsContext(bitmapImageRep: rep) else { return }
         NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current?.compositingOperation = .copy
+        NSGraphicsContext.current = graphics
+
         NSColor.clear.setFill()
-        dirtyRect.fill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
+        drawContent(in: NSRect(origin: .zero, size: size))
+
         NSGraphicsContext.restoreGraphicsState()
 
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer?.contentsScale = backingScale
+        layer?.contents = rep.cgImage
+        CATransaction.commit()
+    }
+
+    private func drawContent(in rect: NSRect) {
         let s = scale
         if !transparentBackground {
             let pill = NSBezierPath(
-                roundedRect: bounds,
+                roundedRect: rect,
                 xRadius: 22 * s,
                 yRadius: 22 * s
             )
@@ -341,7 +375,7 @@ private final class FloatView: NSView {
             width: dotSize,
             height: dotSize
         )
-        (statusColor.withAlphaComponent(contentAlpha)).setFill()
+        statusColor.withAlphaComponent(contentAlpha).setFill()
         NSBezierPath(ovalIn: dotRect).fill()
         styled(statusText, font: statusFont, color: statusColor).draw(
             at: NSPoint(x: dotRect.maxX + 5 * s, y: padY)
@@ -350,7 +384,7 @@ private final class FloatView: NSView {
         if showResizeGrip {
             let side = 12 * s
             let origin = NSPoint(
-                x: bounds.maxX - side - 14 * s,
+                x: rect.maxX - side - 14 * s,
                 y: 12 * s
             )
             let path = NSBezierPath()
