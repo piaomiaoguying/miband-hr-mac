@@ -1,40 +1,49 @@
-# 小米手环 5 心率监听（macOS）
+# Miband HR Mac
 
-本地读取小米手环“运动心率广播”，实时显示 BPM、绘制趋势、记录 CSV，并提供 OBS 浏览器源和 macOS 原生透明浮窗。不登录小米账号，不需要 auth key，不上传任何数据。
+在 macOS 上读取小米手环「运动心率广播」，实时显示心率，并可记录 CSV、查看趋势图、叠加到 OBS、或以原生透明浮窗常驻桌面。
 
-## 调研结论
+不登录小米账号、不需要 auth key、不上传任何数据。全部在本机通过蓝牙完成。
 
-| 项目 | 结论 |
+## 特性
+
+| 能力 | 说明 |
 | --- | --- |
-| 上游项目 | [Tnze/miband-heart-rate](https://github.com/Tnze/miband-heart-rate)，MIT，145 Stars |
-| 支持系统 | Windows、macOS、Linux（Rust `bluest` / CoreBluetooth） |
-| 官方产物 | 作者发布的可执行文件是 Windows 版；macOS 需要自行编译 |
-| 支持手环 | 小米手环 4、5、6、7 的“运动心率广播” |
-| 本机系统 | macOS 15.8.1（24H32），Apple M1，已在本机完成构建与面板验证 |
-| 小米手环 5 | 支持，前提是官方 App 中有“运动心率广播”选项，并在手环上开始一项运动 |
-| 网络与账号 | 全程本地 BLE，不需要登录，不需要 auth key |
+| 厂商广播解析 | 监听 Xiaomi / Huami 广播（Company ID `0x0157`），不做 GATT 连接，不需要配对 |
+| 原生浮窗 | AppKit 透明浮窗，置顶显示、可拖动、可缩放、可点击穿透、支持纯透明背景 |
+| 网页面板 | 实时 BPM、本次最低 / 平均 / 最高、5–60 分钟趋势图、数据表、CSV 导出 |
+| OBS 悬浮层 | 透明背景的浏览器源，适合叠加到直播画面 |
+| 数据记录 | 按天写入 `data/heart-rate-YYYY-MM-DD.csv` |
+| 广播稀疏自适应 | 手环广播间隔较大时继续显示上次心率并标注时间，不闪 `--` |
+| 开机自启 | 原生浮窗右键菜单可开关登录自启（LaunchAgent） |
 
-心率数据来自小米厂商广播：Company ID `0x0157`，payload 第 4 个字节（偏移 `3`）。手环未进入运动模式时该字节通常为 `255` 或 `0`，不会产生有效心率。
+## 支持范围
+
+| 项目 | 说明 |
+| --- | --- |
+| 支持手环 | 小米手环 4 / 5 / 6 / 7 的「运动心率广播」 |
+| 系统要求 | macOS 12 或以上（浮窗为 arm64 构建） |
+| 网络与账号 | 全程本地 BLE，不需要登录，不需要 auth key |
+| 使用前提 | 官方 App 中开启「运动心率广播」，并在手环上开始一项运动 |
+
+心率来自小米厂商广播：Company ID `0x0157`，payload 第 4 个字节（偏移 `3`）。手环未进入运动模式时该字节通常为 `255` 或 `0`，不会产生有效心率。
 
 ## 目录
 
 ```
 miband-hr-mac/
-├── bin/miband-hr-mac        macOS arm64 可执行文件
-├── src/                     完整 Rust 源码
-├── web/                     仪表盘与 OBS 悬浮层页面
-├── native/                  原生浮窗 AppKit 源码与 Info.plist
-├── dist/MibandFloat.app     macOS 原生透明浮窗
-├── start.command            双击后台启动（同时打开原生浮窗）
-├── stop.command             双击停止（同时关闭浮窗）
-├── status.command           双击查看运行状态与当前心率
-├── run.command              双击前台启动（日志显示在终端，Ctrl-C 停止）
-├── mock.command             双击启动（模拟数据，预览面板）
-├── diagnose.command         双击启动（打印 BLE 原始广播）
-├── build.sh                 重新编译 Rust 服务
-├── build-float.sh           重新编译原生浮窗
-├── data/                    CSV 与运行日志（首次启动自动创建）
-├── docs/protocol.md         广播协议与调试笔记
+├── src/                      Rust 后台服务（BLE、状态、HTTP）
+├── web/                      网页面板与 OBS 悬浮层
+├── native/                   原生浮窗 AppKit 源码与 Info.plist
+├── docs/protocol.md          广播协议与调试笔记
+├── start.command             双击后台启动（同时打开原生浮窗）
+├── stop.command              双击停止（同时关闭浮窗）
+├── status.command            双击查看运行状态与当前心率
+├── run.command               双击前台启动（日志显示在终端）
+├── mock.command              双击启动（模拟数据，预览面板）
+├── diagnose.command          双击启动（打印 BLE 原始广播）
+├── build.sh                  编译 Rust 服务 → bin/
+├── build-float.sh            编译原生浮窗 → dist/MibandFloat.app
+├── data/                     CSV 与运行日志（运行时自动创建，不入库）
 └── README.md
 ```
 
@@ -152,7 +161,7 @@ http://127.0.0.1:3030/overlay?scale=1.4&color=%23e66767
 
 ## 命令行
 
-`run.command` 和 `start.command` 都会把参数原样传给程序。常用参数：
+`run.command` 和 `start.command` 都会把参数原样传给程序。以下命令需先执行 `./build.sh` 生成 `bin/miband-hr-mac`：
 
 ```bash
 # 换端口
@@ -241,7 +250,7 @@ http://127.0.0.1:3030/overlay?scale=1.4&color=%23e66767
 
 **直接启动 App 后显示“需要蓝牙权限”或一直“正在扫描”**
 
-首次直接启动时 macOS 会弹出“MibandFloat.app 想要使用蓝牙”，需要点 **允许**。错过提示时，在浮窗菜单选择 **蓝牙权限设置**，打开 **系统设置 → 隐私与安全性 → 蓝牙** 允许 MibandFloat，然后选择 **重启后台服务**。后台服务和浮窗必须配对运行；后台服务单独跑在 `bin/miband-hr-mac`。
+首次直接启动时 macOS 会弹出“MibandFloat.app 想要使用蓝牙”，需要点 **允许**。错过提示时，在浮窗菜单选择 **蓝牙权限设置**，打开 **系统设置 → 隐私与安全性 → 蓝牙** 允许 MibandFloat，然后选择 **重启后台服务**。后台服务和浮窗必须配对运行；后台服务即 `bin/miband-hr-mac`（由 `build.sh` 生成）。
 
 **锁定位置后浮窗拖不动**
 
@@ -256,7 +265,7 @@ http://127.0.0.1:3030/overlay?scale=1.4&color=%23e66767
 在终端进入本目录，补一次权限：
 
 ```bash
-chmod +x start.command stop.command status.command run.command mock.command diagnose.command build.sh build-float.sh bin/miband-hr-mac
+chmod +x start.command stop.command status.command run.command mock.command diagnose.command build.sh build-float.sh
 ```
 
 如果系统提示“无法验证开发者”，右键对应脚本选择“打开”，或执行：
@@ -302,16 +311,24 @@ xattr -dr com.apple.quarantine .
 - 标准心率回退：服务 `0x180D`，特征 `0x2A37`，兼容标准心率带。
 - 同一时间只跟踪一个目标设备；可用 `--device` 固定。
 - 所有服务只监听 `127.0.0.1`，不对外网开放。
-- 上游项目：Tnze/miband-heart-rate（MIT）。本目录的修改与新增代码同样以 MIT 发布，见 `LICENSE`。
-- 协议与调试细节：`docs/protocol.md`。
+- 协议与调试细节见 [`docs/protocol.md`](docs/protocol.md)。
 
-## 开发
+## 从源码构建
+
+需要 Rust 工具链与 Xcode Command Line Tools。
 
 ```bash
+# macOS 上安装依赖
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# 构建
 ./build.sh          # cargo build --release，产物复制到 bin/
 ./build-float.sh    # swiftc 编译原生浮窗，产物在 dist/MibandFloat.app
 cargo test          # 广播解析、标准心率解析、CSV 转义等单元测试
 ```
+
+构建产物（`bin/`、`dist/`）与运行时数据（`data/`）都不纳入版本控制。
 
 前端为单个 HTML 文件，无 CDN、无外部字体、无构建步骤；修改 `web/` 后重新执行 `./build.sh` 即可（HTML 通过 `include_str!` 编译进二进制）。原生浮窗源码在 `native/`，修改后执行 `./build-float.sh`。
 
@@ -321,3 +338,13 @@ cargo test          # 广播解析、标准心率解析、CSV 转义等单元测
 - [小米手环 OBS 直播心率简明教程](https://www.bilibili.com/read/cv27510579/)
 - [小米手环 5 无线心率广播应用](https://zhuanlan.zhihu.com/p/591331326)
 - [Gadgetbridge](https://github.com/Freeyourgadget/Gadgetbridge)（Android 端小米手环协议参考）
+
+## 致谢
+
+本项目受 [Tnze/miband-heart-rate](https://github.com/Tnze/miband-heart-rate)（MIT）启发。该项目的 Rust + `bluest` 蓝牙思路为本项目提供了起点；本项目在此之上改为解析小米厂商广播（`0x0157`），并新增网页面板、OBS 悬浮层、原生浮窗等能力，代码为独立实现。
+
+本项目同样以 MIT 协议发布，见 [LICENSE](LICENSE)。
+
+## 免责声明
+
+本项目与小米、华米无任何关联，未获其授权或背书。「小米」「Mi Band」等商标归各自所有者所有。使用本软件产生的任何后果由使用者自行承担。

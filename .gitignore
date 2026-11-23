@@ -1,4 +1,15 @@
+# 构建产物
 target/
+bin/
+dist/
+
+# 运行时数据（心率 CSV、日志、PID）
 data/
+
+# macOS / 编辑器
 .DS_Store
 __pycache__/
+
+# Xcode / Swift
+*.xcuserstate
+.swiftpm/
