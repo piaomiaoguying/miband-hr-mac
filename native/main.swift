@@ -216,8 +216,11 @@ private final class FloatView: NSView {
             return
         }
 
+        // 交给系统原生拖动：WindowServer 直接跟随鼠标，不经过应用事件循环，
+        // 这是唯一没有延迟的实现方式。
         resizing = false
-        dragStartOrigin = window.frame.origin
+        dragStartOrigin = nil
+        window.performDrag(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
