@@ -185,18 +185,64 @@ impl SharedState {
     }
 
     /// 等待下一次状态变化。返回变化后的精简状态。
+    ///
+    /// 状态不仅随数据到达变化，也会随时间自然过期（实时 → 保持中 → 信号中断）。
+    /// 过期时没有新广播触发 bump，因此这里额外按距离下一次过期的剩余时间唤醒，
+    /// 保证手环断联后订阅端能按时收到状态降级。
     pub async fn wait_for_change(&self, last_seen: u64) -> StatusEvent {
         loop {
             // 先登记等待，再检查 revision，避免丢失通知。
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.revision.load(Ordering::SeqCst) != last_seen {
                 return self.status_event();
             }
-            notified.await;
+            match self.next_transition_in() {
+                Some(remaining) => {
+                    tokio::select! {
+                        _ = notified => {}
+                        _ = tokio::time::sleep(remaining + Duration::from_millis(1)) => {
+                            return self.status_event();
+                        }
+                    }
+                }
+                None => notified.await,
+            }
             if self.revision.load(Ordering::SeqCst) != last_seen {
                 return self.status_event();
             }
         }
+    }
+
+    /// 距离下一次状态随时间过期的剩余时间，用于推送端的定时唤醒。
+    /// 判定条件与 snapshot() 保持一致：
+    /// 有可显示心率时，last_valid 超过 stale 由实时降为保持中，超过 hold 判为信号中断；
+    /// 无心率时，last_packet 超过 stale 判为信号中断。
+    fn next_transition_in(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let inner = self.inner.read().unwrap();
+        let stale = Duration::from_secs(self.cfg.stale_secs);
+        let hold = Duration::from_secs(self.cfg.hold_secs.max(self.cfg.stale_secs));
+        let valid_age = inner.last_valid.map(|last| now.duration_since(last));
+        let packet_age = inner.last_packet.map(|last| now.duration_since(last));
+
+        if inner.bpm.is_some() {
+            if let Some(age) = valid_age {
+                if age <= stale {
+                    return Some(stale - age);
+                }
+                if age <= hold {
+                    return Some(hold - age);
+                }
+            }
+        }
+        if let Some(age) = packet_age {
+            if age <= stale {
+                return Some(stale - age);
+            }
+        }
+        None
     }
 
     pub fn observe_advert(
@@ -832,6 +878,88 @@ mod advert_tests {
         let snapshot = state.snapshot(10);
         assert_eq!(snapshot.status, "waiting");
         assert_eq!(snapshot.bpm, None);
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+
+    fn test_state(stale_secs: u64, hold_secs: u64) -> Arc<SharedState> {
+        let dir = std::env::temp_dir().join(format!(
+            "miband-hr-mac-transition-test-{}-{stale_secs}-{hold_secs}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        SharedState::new(Config {
+            mode: Mode::Adv,
+            port: 0,
+            device: None,
+            offset: 3,
+            stale_secs,
+            hold_secs,
+            web_on_start: false,
+            data_dir: dir,
+            open_browser: false,
+            verbose: false,
+            dump_all: false,
+        })
+    }
+
+    fn observe(state: &SharedState) {
+        state.observe_advert(
+            "Mi Smart Band 5",
+            "test-device",
+            Some(-52),
+            XIAOMI_COMPANY_ID,
+            &[0xAA, 0xBB, 0xCC, 88, 0x00],
+            3,
+        );
+    }
+
+    fn age_last_data(state: &SharedState, seconds: u64) {
+        let mut inner = state.inner.write().unwrap();
+        let aged = Instant::now() - Duration::from_secs(seconds);
+        inner.last_packet = Some(aged);
+        inner.last_valid = Some(aged);
+    }
+
+    #[test]
+    fn reports_next_expiry() {
+        let state = test_state(6, 45);
+        observe(&state);
+
+        let remaining = state.next_transition_in().expect("刚收到数据应有过期时间");
+        assert!(remaining <= Duration::from_secs(6));
+        assert!(remaining > Duration::from_secs(5));
+
+        age_last_data(&state, 12);
+        let remaining = state.next_transition_in().expect("保持中仍应有过期时间");
+        assert!(remaining <= Duration::from_secs(33));
+        assert!(remaining > Duration::from_secs(32));
+
+        age_last_data(&state, 60);
+        assert!(state.next_transition_in().is_none());
+    }
+
+    #[tokio::test]
+    async fn pushes_state_change_when_stream_goes_silent() {
+        let state = test_state(1, 2);
+        observe(&state);
+
+        let mut last = state.revision();
+        let mut statuses = Vec::new();
+        for _ in 0..5 {
+            let event = tokio::time::timeout(Duration::from_secs(3), state.wait_for_change(last))
+                .await
+                .expect("数据停止后应在过期时主动推送");
+            last = event.revision;
+            statuses.push(event.status);
+            if event.status == "stale" {
+                break;
+            }
+        }
+        assert_eq!(statuses.last().copied(), Some("stale"));
     }
 }
 

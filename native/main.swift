@@ -131,6 +131,17 @@ private final class FloatView: NSView {
     private var contentAlpha: CGFloat = 1
     private let labelPadding: CGFloat = 6
 
+    /// 状态文字形态。带年龄的状态（保持中 / 信号中断）需要在两次推送之间持续走秒，
+    /// 否则断联后「N 秒前」会停在推送那一刻。
+    private enum StatusKind {
+        case plain
+        case aged(prefix: String)
+    }
+
+    private var statusKind: StatusKind = .plain
+    private var stateAgeMs: Int?
+    private var stateReceivedAt: Date?
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -303,48 +314,66 @@ private final class FloatView: NSView {
         let status = state?.status ?? ""
         let age = state?.lastValidAgeMs
         bpmValue = bpm
+        stateAgeMs = age
+        stateReceivedAt = Date()
 
         let permissionIssue = connected
             && (state?.lastError?.contains("未授权") == true || state?.lastError?.contains("蓝牙不可用") == true)
 
         if permissionIssue {
             bpmText = bpm.map(String.init) ?? ""
-            statusText = "需要蓝牙权限"
-            statusColor = seriousColor
-            contentAlpha = 0.85
+            applyPlainStatus("需要蓝牙权限", color: seriousColor, alpha: 0.85)
         } else if !connected {
             bpmText = bpm.map(String.init) ?? ""
-            statusText = "后端未运行"
-            statusColor = mutedColor
-            contentAlpha = 0.7
+            applyPlainStatus("后端未运行", color: mutedColor, alpha: 0.7)
         } else if bpm != nil {
             bpmText = String(bpm!)
             switch status {
             case "live":
-                statusText = "实时"
-                statusColor = positiveColor
-                contentAlpha = 1
+                applyPlainStatus("实时", color: positiveColor, alpha: 1)
             case "holding":
-                statusText = "保持中 · \(ageText(age))"
-                statusColor = warnColor
-                contentAlpha = 1
+                applyAgedStatus("保持中", color: warnColor, alpha: 1)
             case "stale":
-                statusText = "信号中断 · \(ageText(age))"
-                statusColor = seriousColor
-                contentAlpha = 0.6
+                applyAgedStatus("信号中断", color: seriousColor, alpha: 0.6)
             default:
-                statusText = state?.statusLabel ?? "等待心率"
-                statusColor = mutedColor
-                contentAlpha = 0.7
+                applyPlainStatus(state?.statusLabel ?? "等待心率", color: mutedColor, alpha: 0.7)
             }
         } else {
             bpmText = ""
-            statusText = state?.statusLabel ?? "正在连接"
-            statusColor = mutedColor
-            contentAlpha = 0.7
+            applyPlainStatus(state?.statusLabel ?? "正在连接", color: mutedColor, alpha: 0.7)
         }
 
         updateHeartAnimation()
+    }
+
+    private func applyPlainStatus(_ text: String, color: NSColor, alpha: CGFloat) {
+        statusKind = .plain
+        statusText = text
+        statusColor = color
+        contentAlpha = alpha
+    }
+
+    private func applyAgedStatus(_ prefix: String, color: NSColor, alpha: CGFloat) {
+        statusKind = .aged(prefix: prefix)
+        statusColor = color
+        contentAlpha = alpha
+        statusText = "\(prefix) · \(ageText(currentAgeMs))"
+    }
+
+    /// 两次推送之间持续走动的“最后数据年龄”。
+    private var currentAgeMs: Int? {
+        guard let base = stateAgeMs else { return nil }
+        guard let received = stateReceivedAt else { return base }
+        return base + max(0, Int(Date().timeIntervalSince(received) * 1000))
+    }
+
+    /// 供定时器调用：只刷新带年龄的状态文字，其他状态直接跳过。
+    func refreshAge() {
+        guard case .aged(let prefix) = statusKind else { return }
+        let next = "\(prefix) · \(ageText(currentAgeMs))"
+        guard next != statusText else { return }
+        statusText = next
+        renderContent()
     }
 
     override func updateTrackingAreas() {
@@ -585,6 +614,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var moveObserver: NSObjectProtocol?
     private var saveFrameWorkItem: DispatchWorkItem?
     private var unlockHotKeyRef: EventHotKeyRef?
+    private var ageTimer: Timer?
 
     private let defaults = UserDefaults.standard
     private var port = 3030
@@ -604,6 +634,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         observeWindowMoves()
         registerUnlockHotKey()
         startEventStream()
+        startAgeTicker()
         refreshServiceState()
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self, !self.backendReachable else { return }
@@ -704,6 +735,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         stopEventStream()
+        ageTimer?.invalidate()
+        ageTimer = nil
         saveWindowFrame()
         backendLogHandle?.closeFile()
         backendLogHandle = nil
@@ -972,6 +1005,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(data: data, encoding: .utf8)
+    }
+
+    /// 每秒推进一次状态年龄，只在「保持中 / 信号中断」时真正重绘。
+    private func startAgeTicker() {
+        ageTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.floatView.refreshAge()
+        }
     }
 
     /// 订阅后端推送流。没有广播时连接静默，不做任何轮询计算。
